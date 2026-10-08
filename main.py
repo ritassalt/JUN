@@ -59,7 +59,8 @@ def init_db():
             rho_final REAL,
             f1_start TEXT,
             f1_end TEXT,
-            state TEXT NOT NULL DEFAULT 'f1'
+            state TEXT NOT NULL DEFAULT 'f1',
+            next_cycle_started INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS bottles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +195,7 @@ class JarIn(BaseModel):
     honeytee_id: int
     starter_ml: Optional[float] = None
     ph: Optional[float] = None
+    from_jar_id: Optional[int] = None
 
 
 class JarFinishF1In(BaseModel):
@@ -423,6 +425,17 @@ def create_jar(payload: JarIn):
         title = make_jar_title(conn, jid, payload.honeytee_id)
         conn.execute("UPDATE jar SET title=? WHERE id=?", (title, jid))
         log_event(conn, "jar", jid, "f1", "created", payload.model_dump())
+
+        # помечаем родительскую базу как «из неё запущен цикл»
+        if payload.from_jar_id:
+            parent = conn.execute("SELECT * FROM jar WHERE id=?", (payload.from_jar_id,)).fetchone()
+            if parent:
+                conn.execute("UPDATE jar SET next_cycle_started=1 WHERE id=?", (payload.from_jar_id,))
+                log_event(conn, "jar", payload.from_jar_id, parent["state"], "new_cycle_started", {
+                    "new_jar_id": jid,
+                    "new_jar_title": title,
+                })
+
         return enrich_jar(row_to_dict(conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()), conn)
 
 
@@ -518,6 +531,9 @@ def finish_f1(jid: int, payload: JarFinishF1In):
 @app.post("/api/jars/{jid}/new_cycle")
 def new_cycle_hint(jid: int):
     with db() as conn:
+        j = conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()
+        if not j:
+            raise HTTPException(404, "jar not found")
         available = conn.execute("""
             SELECT h.* FROM honeytee h
             WHERE NOT EXISTS (SELECT 1 FROM jar j WHERE j.honeytee_id = h.id)
@@ -599,6 +615,7 @@ def delete_bottle(bid: int):
         conn.execute("DELETE FROM bottles WHERE id=?", (bid,))
         return {"ok": True}
 
+
 @app.patch("/api/bottles/{bid}/additives/{idx}")
 def update_additive(bid: int, idx: int, payload: AdditiveIn):
     if payload.unit not in VALID_UNITS:
@@ -626,7 +643,8 @@ def update_additive(bid: int, idx: int, payload: AdditiveIn):
             "new": current[idx],
         })
         return bottle_to_dict(conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone())
-        
+
+
 @app.post("/api/bottles/{bid}/additives")
 def add_additive(bid: int, payload: AdditiveIn):
     if payload.unit not in VALID_UNITS:
@@ -851,4 +869,5 @@ def index():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
