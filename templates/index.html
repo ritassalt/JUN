@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Джун</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="apple-touch-icon" href="/static/favicon.png">
+<meta name="theme-color" content="#8b6b3f">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <img src="/static/favicon.png" alt="" class="brand-icon">
+    <h1>Джун</h1>
+  </div>
+  <div class="row">
+    <button class="ghost" onclick="doBackup()">Бэкап</button>
+    <button class="ghost" onclick="openRestore()">Импорт</button>
+  </div>
+</header>
+
+<main>
+  <div class="tabs">
+    <button id="tab-bottles" onclick="switchTab('bottles')">Бутылки</button>
+    <button id="tab-jars" class="active" onclick="switchTab('jars')">Лимонадница</button>
+    <button id="tab-honeytee" onclick="switchTab('honeytee')">Медочай</button>
+  </div>
+  <div id="content"></div>
+</main>
+
+<div class="fab">
+  <button class="primary" id="fabBtn" onclick="openCreate()">+ Создать</button>
+</div>
+
+<div id="modalRoot"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
