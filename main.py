@@ -60,7 +60,8 @@ def init_db():
             f1_start TEXT,
             f1_end TEXT,
             state TEXT NOT NULL DEFAULT 'f1',
-            next_cycle_started INTEGER DEFAULT 0
+            next_cycle_started INTEGER DEFAULT 0,
+            f2_force_ready INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS bottles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,11 +274,10 @@ def compute_jar_reminder(j):
         except Exception:
             return None
         days = (datetime.now() - created).days
-        if days == 0: return "Проверь через 3 дня, чему равен pH (ориентир 3.5)"
-        if days == 1: return "Проверь через 2 дня, чему равен pH (ориентир 3.5)"
-        if days == 2: return "Проверь через 1 день, чему равен pH (ориентир 3.5)"
-        if days == 3: return "Пора проверить pH (ориентир 3.5)"
-        return f"Пора проверить pH (+{days - 3} дн., ориентир 3.5)"
+        if days == 0: return "Проверь через 3 дня значение pH (~3.5)"
+        if days == 1: return "Проверь через 2 дня значение pH (~3.5)"
+        if days == 2: return "Проверь через 1 день значение pH (~3.5)"
+        return "Пора проверить pH (~3.5)"
     return None
 
 
@@ -433,11 +433,19 @@ def create_jar(payload: JarIn):
                 conn.execute("UPDATE jar SET next_cycle_started=1 WHERE id=?", (payload.from_jar_id,))
                 log_event(conn, "jar", payload.from_jar_id, parent["state"], "new_cycle_started", {
                     "new_jar_id": jid,
-                    "new_jar_title": title,
                 })
 
         return enrich_jar(row_to_dict(conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()), conn)
 
+@app.post("/api/jars/{jid}/force_f2_ready")
+def force_f2_ready(jid: int):
+    with db() as conn:
+        j = conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()
+        if not j:
+            raise HTTPException(404, "jar not found")
+        conn.execute("UPDATE jar SET f2_force_ready=1 WHERE id=?", (jid,))
+        log_event(conn, "jar", jid, j["state"], "f2_force_ready")
+        return {"ok": True}
 
 @app.delete("/api/jars/{jid}")
 def delete_jar(jid: int):
@@ -586,6 +594,8 @@ def patch_bottle(bid: int, payload: BottleIn):
             raise HTTPException(404, "bottle not found")
         if row["stage"] in ("consumed", "discarded"):
             raise HTTPException(409, "Нельзя редактировать выпитую или выброшенную бутылку")
+        if row["stage"] != "f2" and not row["has_additives"]:
+            raise HTTPException(409, "Нельзя редактировать бутылку без добавок после F2")
         upd = {}
         for k in ("volume_ml", "filled_ml", "density", "notes"):
             v = getattr(payload, k)
@@ -626,6 +636,8 @@ def update_additive(bid: int, idx: int, payload: AdditiveIn):
             raise HTTPException(404, "bottle not found")
         if row["stage"] in ("consumed", "discarded"):
             raise HTTPException(409, "Нельзя редактировать добавки выпитой или выброшенной бутылки")
+        if row["stage"] != "f2" and not row["has_additives"]:
+            raise HTTPException(409, "Нельзя менять добавки в бутылке без добавок после F2")
         current = json.loads(row["additives"]) if row["additives"] else []
         if idx < 0 or idx >= len(current):
             raise HTTPException(400, "invalid index")
@@ -653,6 +665,8 @@ def add_additive(bid: int, payload: AdditiveIn):
         row = conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone()
         if not row:
             raise HTTPException(404, "bottle not found")
+        if row["stage"] != "f2" and not row["has_additives"]:
+            raise HTTPException(409, "Нельзя добавлять добавки в бутылку без добавок после F2")
         current = json.loads(row["additives"]) if row["additives"] else []
         item = {"name": payload.name, "amount": payload.amount, "unit": payload.unit, "note": payload.note}
         current.append(item)
@@ -668,6 +682,8 @@ def remove_additive(bid: int, idx: int):
         row = conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone()
         if not row:
             raise HTTPException(404, "bottle not found")
+        if row["stage"] != "f2" and not row["has_additives"]:
+            raise HTTPException(409, "Нельзя менять добавки в бутылке без добавок после F2")
         current = json.loads(row["additives"]) if row["additives"] else []
         if idx < 0 or idx >= len(current):
             raise HTTPException(400, "invalid index")

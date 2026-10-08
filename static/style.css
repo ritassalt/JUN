@@ -9,7 +9,16 @@
     --skip: #8a5a00;
     --info: #1a5fb4;
 }
-
+.badge.f2-ready {
+  background: #fff1cc;
+  color: #8a5a00;
+  border: 1px solid #f0d698;
+}
+.badge.f2-carbonating {
+  background: #e6f4ea;
+  color: #1e7b3a;
+  border: 1px solid #b8ddc2;
+}
 * {
     box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;

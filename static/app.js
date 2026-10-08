@@ -124,39 +124,140 @@ function renderBottles() {
         const count = g.bottles.length;
         // первая дата для заголовка
         const firstDate = g.bottles.map(b => b.created_at).sort()[0];
-        const list = g.bottles.map(b => {
-            const isClosed = b.stage === 'consumed' || b.stage === 'discarded';
-            return `
-        <div class="card" style="padding:8px;margin:6px 0">
-          <div onclick="openBottle(${b.id})" style="cursor:pointer">
-            <b>${esc(b.title || ('#' + b.id))}</b> <span class="badge ${b.stage}">${STAGE_LABEL[b.stage] || b.stage}</span>${b.material === 'pet' ? ' <span class="badge control">Контроль</span>' : ''}
-            <div class="meta">${b.volume_ml || '?'} мл (${MATERIAL_LABEL[b.material] || b.material}) • залито ${b.filled_ml || '?'} мл • ρ финал ${b.density ?? '—'}</div>
-            ${b.additives && b.additives.length ? `<div class="meta">Добавки: ${b.additives.map(a => esc(a.name) + ' ' + a.amount + UNIT_LABEL[a.unit]).join(', ')}</div>` : ''}
-          </div>
-          ${isClosed ? '' : `
-            <div class="row" style="margin-top:6px">
-              <button class="ghost" onclick="editBottle(${b.id})">✏️ Изменить</button>
-              <button class="danger" onclick="deleteBottleFromList(${b.id})">🗑 Удалить</button>
-            </div>
-          `}
+        const list = g.bottles.map(b=>{
+      return `
+        <div class="card" style="padding:8px;margin:6px 0;cursor:pointer" onclick="openBottle(${b.id})">
+          <b>${esc(b.title||('#'+b.id))}</b> <span class="badge ${b.stage}">${STAGE_LABEL[b.stage]||b.stage}</span>
+          <div class="meta">${b.volume_ml||'?'} мл (${MATERIAL_LABEL[b.material]||b.material}) • залито ${b.filled_ml||'?'} мл • ρ финал ${b.density??'—'}</div>
+          ${b.additives && b.additives.length ? `<div class="meta">Добавки: ${b.additives.map(a=>esc(a.name)+' '+a.amount+UNIT_LABEL[a.unit]).join(', ')}</div>`:''}
         </div>
       `;
-        }).join('');
+    }).join('');
 
         // группа свёрнута, если все бутылки в конечных статусах
         const allClosed = g.bottles.every(b => b.stage === 'consumed' || b.stage === 'discarded');
         const openAttr = allClosed ? '' : 'open';
 
-        return `
+            // статус ПЭТ: ищем ПЭТ-бутылку в партии
+    const pet = g.bottles.find(b => b.material === 'pet');
+    let petLabel = '';
+    if(pet){
+      if(pet.pet_state === 'bubbled'){
+        petLabel = `<span class="badge control">ПЭТ надулась</span>`;
+      } else if(pet.pet_state === 'not_bubbled'){
+        petLabel = `<span class="badge">ПЭТ ещё нет</span>`;
+      } else {
+        petLabel = `<span class="badge control">ПЭТ контроль</span>`;
+      }
+    }
+
+        const st2 = f2Status(g, state.jars);
+
+    let statusBadge = '';
+    let finishBtn = '';
+    if(st2 && st2.kind === 'ready'){
+      statusBadge = `<span class="badge f2-ready">Время подошло</span>`;
+      finishBtn = `<div class="row" style="margin:8px 0"><button class="primary" style="flex:1" onclick="finishF2Wizard(${g.jar_id})">Завершить F2 партии</button></div>`;
+    } else if(st2 && st2.kind === 'carbonating'){
+      statusBadge = `<span class="badge f2-carbonating" style="cursor:pointer" onclick="event.stopPropagation(); event.preventDefault(); f2StatusClick(${g.jar_id}, ${st2.pet?st2.pet.id:0})">Карбонизируемся...</span>`;
+    }
+
+    return `
       <details class="group" ${openAttr}>
         <summary class="group-summary">
-          <span class="group-title">Партия ${esc(g.jar_title)} ${badge}</span>
-          <span class="group-meta">${count} ${count === 1 ? 'бутылка' : (count < 5 ? 'бутылки' : 'бутылок')} • ${fmtDateOnly(firstDate)}</span>
+          <span class="group-title">Партия ${esc(g.jar_title)}</span>
+          <span class="group-meta">${count} ${count===1?'бутылка':(count<5?'бутылки':'бутылок')} • ${fmtDateOnly(firstDate)}</span>
         </summary>
-        <div class="group-body">${list}</div>
+        <div class="group-body">
+          ${statusBadge ? `<div style="margin:4px 0 8px">${statusBadge}</div>` : ''}
+          ${list}
+          ${finishBtn}
+        </div>
       </details>
     `;
     }).join('');
+}
+
+function f2Status(g, jars){
+  // ищем базу партии
+  const jar = jars.find(j => j.id === g.jar_id);
+  if(!jar || jar.state !== 'bottled') return null;
+
+  // все бутылки партии должны быть в f2
+  const allF2 = g.bottles.every(b => b.stage === 'f2');
+  if(!allF2) return null;
+
+  // ПЭТ в партии
+  const pet = g.bottles.find(b => b.material === 'pet');
+
+  // Условие "время подошло": ПЭТ надулась ИЛИ прошло 3 дня с f1_end ИЛИ форс-флаг
+  let timePassed = false;
+  if(jar.f1_end){
+    const t = new Date(jar.f1_end).getTime();
+    const days = (Date.now() - t) / (1000*60*60*24);
+    timePassed = days >= 3;
+  }
+
+  const bubbled = pet && pet.pet_state === 'bubbled';
+  const forced = !!jar.f2_force_ready;
+
+  if(bubbled || timePassed || forced){
+    return { kind: 'ready', pet };
+  }
+  return { kind: 'carbonating', pet };
+}
+
+async function f2StatusClick(jarId, petBottleId){
+  if(petBottleId){
+    openModal(`
+      <h2>ПЭТ надулась?</h2>
+      <div class="actions" style="flex-direction:column">
+        <button class="primary" onclick="f2StatusAnswer(${petBottleId}, ${jarId}, true)">Да, надулась</button>
+        <button class="ghost" onclick="f2StatusAnswer(${petBottleId}, ${jarId}, false)">Ещё нет</button>
+      </div>
+    `);
+  } else {
+    // считаем дни до планового завершения (3 дня от f1_end)
+    const jar = state.jars.find(j => j.id === jarId);
+    let daysLeftText = '';
+    if(jar && jar.f1_end){
+      const t = new Date(jar.f1_end).getTime();
+      const daysPassed = (Date.now() - t) / (1000*60*60*24);
+      const daysLeft = Math.max(0, Math.ceil(3 - daysPassed));
+      if(daysLeft === 0){
+        daysLeftText = 'Плановое завершение: уже пора.';
+      } else if(daysLeft === 1){
+        daysLeftText = 'Плановое завершение через 1 день.';
+      } else {
+        daysLeftText = `Плановое завершение через ${daysLeft} дня.`;
+      }
+    }
+    openModal(`
+      <h2>Контрольной ПЭТ нет</h2>
+      ${daysLeftText ? `<p class="meta">${daysLeftText}</p>` : ''}
+      <p>Завершить карбонизацию прямо сейчас?</p>
+      <div class="actions" style="flex-direction:column">
+        <button class="primary" onclick="f2ForceReady(${jarId})">Да, время подошло</button>
+        <button class="ghost" onclick="closeModal()">Ещё нет</button>
+      </div>
+    `);
+  }
+}
+
+async function f2StatusAnswer(petBottleId, jarId, bubbled){
+  try {
+    await api.post(`/api/bottles/${petBottleId}/pet_check`, { bubbled });
+    closeModal();
+    await refresh();
+  } catch(e){ alert(e.message); }
+}
+
+async function f2ForceReady(jarId){
+  try {
+    await api.post(`/api/jars/${jarId}/force_f2_ready`);
+    closeModal();
+    await refresh();
+  } catch(e){ alert(e.message); }
 }
 
 let currentJarOrigin = null;
@@ -172,14 +273,14 @@ function renderJars() {
       <div class="card">
         <div onclick="openJar(${j.id})" style="cursor:pointer">
           <h3>${esc(j.title || ('#' + j.id))} <span class="badge ${j.state}">${STAGE_LABEL[j.state] || j.state}</span></h3>
-          <div class="meta">${fmtDateOnly(j.created_at)} • стартер ${j.starter_ml || '?'} мл • pH старт ${j.ph ?? '—'}${j.final_ph != null ? ' • pH финал ' + j.final_ph : ''}</div>
-          ${j.state === 'bottled' ? `<div class="meta">Разлито: ${j.total_filled_ml} мл из ${j.total_in_ml} мл • Остаток: ${j.leftover_ml} мл</div>` : ''}
+          <div class="meta">${fmtDateOnly(j.created_at)}${j.state === 'bottled'
+            ? ` • Объём: ${j.total_in_ml} мл • Разлито: ${j.total_filled_ml} мл • Остаток: ${j.leftover_ml} мл`
+            : ` • Объём: ${j.total_in_ml} мл`}</div>
           ${j.reminder ? `<div class="reminder">${esc(j.reminder)}</div>` : ''}
         </div>
         <div class="row" style="margin-top:8px">
-          ${j.state === 'f1' ? `<button class="primary" onclick="finishF1Wizard(${j.id})">Завершить F1</button>` : ''}
-          ${(j.state === 'bottled' && !j.next_cycle_started) ? `<button class="primary" onclick="newCycle(${j.id})">Новый цикл</button>` : ''}
-          ${hideDelete ? '' : `<button class="danger" onclick="deleteJar(${j.id})">🗑 Удалить</button>`}
+          ${j.state==='f1'?`<button class="primary" onclick="finishF1Wizard(${j.id})">Завершить F1</button>`:''}
+          ${(j.state==='bottled' && !j.next_cycle_started) ? `<button class="primary" onclick="newCycle(${j.id})">Новый цикл</button>` : ''}
         </div>
       </div>
     `;
@@ -1250,13 +1351,20 @@ async function openJar(id, fromBottleId) {
         ${j.honeytee ? `
         <div class="card" style="padding:8px;margin:8px 0;cursor:pointer" onclick="openHoneytee(${j.honeytee.id}, ${id}, ${fromBottleId || 'null'})">
         <b>Медочай</b>
-        <div class="meta">${fmtDate(j.honeytee.created_at)} • ${esc(j.honeytee.tea_type || '?')} ${j.honeytee.tea_g || '?'} г • ${esc(j.honeytee.honey_type || '?')} ${j.honeytee.honey_g || '?'} г</div>
+        <div class="meta">${esc(j.honeytee.tea_type || '?')} ${j.honeytee.tea_g || '?'} г • ${esc(j.honeytee.honey_type || '?')} ${j.honeytee.honey_g || '?'} г</div>
       </div>
     ` : '<div class="meta">Медочай: —</div>'}
-    <div class="meta">Медочай: ${j.honeytee && j.honeytee.mead_ml ? j.honeytee.mead_ml + ' мл' : '—'} • Стартер на входе: ${j.starter_ml || '?'} мл</div>
-    <div class="meta">ρ старт: ${j.rho_start ?? '—'}${j.rho_final != null ? ' • ρ финал: ' + j.rho_final : ''}</div>
+    <div class="meta">Медочай: ${j.honeytee && j.honeytee.mead_ml ? j.honeytee.mead_ml + ' мл' : '—'} • Стартер: ${j.starter_ml || '?'} мл</div>
+    <div class="meta">ρ старт: ${j.rho_start!=null? j.rho_start+' °Brix' : '—'}${j.rho_final != null ? ' • ρ финал: ' + j.rho_final +' °Brix': ''}</div>
     <div class="meta">pH старт: ${j.ph ?? '—'}${j.final_ph != null ? ' • pH финал: ' + j.final_ph : ''}</div>
-    ${j.state === 'bottled' ? `<div class="meta">Разлито: ${j.total_filled_ml} мл из ${j.total_in_ml} мл • Остаток: <b>${j.leftover_ml} мл</b></div>` : ''}
+    ${j.state === 'bottled' ? `
+		${(()=>{
+        const abv = calcABV(j.rho_start, j.rho_final);
+        return abv != null ? `<div class="meta"><b>≈ ${abv}% алкоголя</b></div>` : '';
+      })()}
+      <div class="meta">Разлито: ${j.total_filled_ml} мл из ${j.total_in_ml} мл</div>
+      <div class="meta">Остаток: <b>${j.leftover_ml} мл</b></div>
+    ` : ''}
     ${j.reminder ? `<div class="reminder">${esc(j.reminder)}</div>` : ''}
 
     ${j.state === 'f1' ? `
@@ -1289,6 +1397,20 @@ async function openJar(id, fromBottleId) {
   `);
 }
 
+function brixToSg(brix){
+  return (brix / (258.6 - (brix / 258.2) * 227.1)) + 1;
+}
+
+function calcABV(rhoStartBrix, rhoFinalBrix){
+  if(rhoStartBrix == null || rhoFinalBrix == null) return null;
+  const og = brixToSg(rhoStartBrix);
+  const fg = brixToSg(rhoFinalBrix);
+  if(og <= fg) return 0; // нет ферментации
+  const abv = (76.08 * (og - fg) / (1.775 - og)) * (fg / 0.794);
+  return Math.max(0, Math.round(abv * 10) / 10); // одна десятая
+}
+
+
 function renderJarHistory(events, jarId) {
     if (!events || !events.length) return '<li>нет событий</li>';
     const sorted = [...events].sort((a, b) => (a.created_at > b.created_at ? 1 : -1));
@@ -1301,10 +1423,10 @@ function renderJarHistory(events, jarId) {
         if (ev.event_type === 'ph') summary = `pH ${p.value ?? '?'}`;
         else if (ev.event_type === 'note') summary = `«${esc(p.text || '')}»`;
         else if (ev.event_type === 'created') summary = 'создание базы';
-        else if (ev.event_type === 'f1_finished') summary = `F1 завершена (pH=${p.final_ph}, ρ финал=${p.rho_final ?? '—'})`;
+        else if (ev.event_type === 'f1_finished') summary = `F1 завершена`;
         else if (ev.event_type === 'bottled') summary = `розлив: ${p.bottles_count} бутылок, ${p.total_filled_ml} мл`;
         else if (ev.event_type === 'f2_finished') summary = 'F2 завершена';
-        else if (ev.event_type === 'new_cycle_started') summary = `запущен новый цикл: ${esc(p.new_jar_title || ('#' + p.new_jar_id))}`;
+        else if(ev.event_type==='new_cycle_started') summary = `запущен новый цикл: #${p.new_jar_id ?? '?'}`;
 
         const btns = EDITABLE.has(ev.event_type)
             ? `<button class="ghost" onclick="editJarEvent(${ev.id}, ${jarId})">✏️</button>
@@ -1475,6 +1597,7 @@ async function deleteJarEvent(eid, jarId) {
 async function openBottle(id) {
     const b = await api.get('/api/bottles/' + id);
     const isClosed = (b.stage === 'consumed' || b.stage === 'discarded');
+	const additivesEditable = (b.stage === 'f2') || b.has_additives;
 
     const additives = (b.additives || []).map((a, i) => {
         const inner = `
@@ -1482,7 +1605,7 @@ async function openBottle(id) {
         <b>${esc(a.name)}</b> · ${a.amount} ${UNIT_LABEL[a.unit]}${a.note ? ' · ' + esc(a.note) : ''}
       </div>
     `;
-        if (isClosed) {
+       if(!additivesEditable){
             return `<div class="card" style="padding:8px;margin:6px 0;display:flex;align-items:center;gap:8px">${inner}</div>`;
         }
         return `<div class="card" style="padding:8px;margin:6px 0;cursor:pointer;display:flex;align-items:center;gap:8px" onclick="editAdditiveForm(${id}, ${i})">${inner}<span style="font-size:14px;flex-shrink:0">✏️</span></div>`;
@@ -1506,33 +1629,9 @@ async function openBottle(id) {
     const stage = b.stage;
     let actionsHtml = '';
 
-    if (stage === 'f2') {
-        let petStatus = {has_pet: false};
-        try {
-            petStatus = await api.get(`/api/jars/${b.jar_id}/pet_status`);
-        } catch (e) {
-        }
-        const isPet = b.material === 'pet';
-
-        if (isPet) {
-            actionsHtml = `
-        <h3 style="margin-top:14px;font-size:14px">Контрольная ПЭТ</h3>
-        <div class="meta">Статус: ${b.pet_state === 'bubbled' ? '✅ надулась' : (b.pet_state === 'not_bubbled' ? '⬜ ещё нет' : 'не проверяли')}
-          ${b.pet_last_check ? ' • ' + fmtDate(b.pet_last_check) : ''}</div>
-        <div class="row" style="margin-top:8px">
-          <button class="ghost" onclick="petCheckBottle(${id})">Проверить ПЭТ</button>
-        </div>
-      `;
-        } else {
-            actionsHtml = `
-        <div class="meta" style="margin-top:12px">Статус ПЭТ партии: ${
-                petStatus.has_pet
-                    ? (petStatus.pet_state === 'bubbled' ? '✅ надулась' : (petStatus.pet_state === 'not_bubbled' ? '⬜ ещё нет' : 'не проверяли'))
-                    : 'контрольной ПЭТ нет'
-            }</div>
-      `;
-        }
-    } else if (stage === 'chilling') {
+      if(stage === 'f2'){
+    actionsHtml = '';
+  } else if(stage === 'chilling'){
         actionsHtml = `
       <div class="info-box">В холодильнике${b.chill_hours != null ? ': ' + b.chill_hours + ' ч' : ''}.</div>
     `;
@@ -1546,12 +1645,18 @@ async function openBottle(id) {
     openModal(`
     <div class="modal-head">
       <h2>${esc(b.title)} <span class="badge ${b.stage}">${STAGE_LABEL[b.stage] || b.stage}</span>${b.material === 'pet' ? ' <span class="badge control">Контроль</span>' : ''}</h2>
-      ${isClosed ? '' : `
-        <div class="head-actions">
-          <button class="ghost" onclick="editBottle(${id})" title="Изменить">✏️</button>
-          <button class="danger" onclick="deleteBottle(${id})" title="Удалить">🗑</button>
-        </div>
-      `}
+      ${(() => {
+        const isF2 = b.stage === 'f2';
+        const canEdit = !isClosed && (isF2 || (b.additives && b.additives.length));
+        const canDelete = !isClosed;
+        if(!canEdit && !canDelete) return '';
+        return `
+          <div class="head-actions">
+            ${canEdit ? `<button class="ghost" onclick="editBottle(${id})" title="Изменить">✏️</button>` : ''}
+            ${canDelete ? `<button class="danger" onclick="deleteBottle(${id})" title="Удалить">🗑</button>` : ''}
+          </div>
+        `;
+      })()}
     </div>
                   <div class="card" style="padding:8px;margin:8px 0;cursor:pointer" onclick="openJar(${b.jar ? b.jar.id : 0}, ${id})">
       <b>Партия: ${b.jar ? esc(b.jar.title) : '—'}</b>
@@ -1559,17 +1664,18 @@ async function openBottle(id) {
     </div>
     <div class="meta">${b.volume_ml} мл (${MATERIAL_LABEL[b.material] || b.material}) • залито ${b.filled_ml} мл • ρ финал ${b.density ?? '—'} °Brix</div>
     ${b.chill_hours != null ? `<div class="meta">В холодильнике: ${b.chill_hours} ч</div>` : ''}
-    ${b.pet_bottle && b.material !== 'pet' ? `<div class="meta">Контрольная ПЭТ: ${esc(b.pet_bottle.title)} — ${b.pet_bottle.pet_state === 'bubbled' ? 'надулась' : (b.pet_bottle.pet_state === 'not_bubbled' ? 'ещё нет' : 'не проверяли')}</div>` : ''}
 
     ${actionsHtml}
 
-    <h3 style="margin-top:14px;font-size:14px">Добавки</h3>
-    ${additives}
-    ${!isClosed
+    ${(additivesEditable || (b.additives && b.additives.length)) ? `
+      <h3 style="margin-top:14px;font-size:14px">Добавки</h3>
+      ${additives}
+      ${additivesEditable
         ? `<div class="row" style="margin-top:8px">
-           <button class="ghost" onclick="addAdditiveForm(${id})">+ Добавить добавку</button>
-         </div>`
+             <button class="ghost" onclick="addAdditiveForm(${id})">+ Добавить добавку</button>
+           </div>`
         : ''}
+    ` : ''}
 
     <h3 style="margin-top:14px;font-size:14px">История</h3>
     <ul class="events">${events}</ul>
@@ -1588,19 +1694,20 @@ function renderBottleStageActions(b, id) {
     let dangerBtn = '';
 
     // основное действие по стадии
-    if (stage === 'f2') {
-        mainBtn = `<button class="primary" style="flex:1" onclick="finishF2Wizard(${b.jar_id}, ${id})">Завершить F2 партии</button>`;
-    } else if (stage === 'f3') {
+    if(stage === 'f2'){
+		// Завершение F2 теперь только из списка бутылок (кнопка под партией)
+		mainBtn = '';
+	  } else if (stage === 'f3') {
         // когда появится F3-действие — здесь
     } else if (stage === 'chilling') {
-        mainBtn = `<button class="primary" style="flex:1" onclick="chillOut(${id})">Достать из холодильника</button>`;
+        mainBtn = `<button class="primary" style="flex:1" onclick="chillOutWithCheck(${id}, ${b.chill_hours!=null?b.chill_hours:0})">Достать из холодильника</button>`;
     } else if (stage === 'stored') {
         mainBtn = `<button class="primary" style="flex:1" onclick="consumeBottleForm(${id})">Выпито</button>`;
     }
 
     // опасное действие — для всех активных стадий
     if (stage !== 'consumed' && stage !== 'discarded') {
-        dangerBtn = `<button class="danger" onclick="discardBottleForm(${id})">🗑 Выбросить</button>`;
+        dangerBtn = `<button class="danger" style="flex:1" onclick="discardBottleForm(${id})">🗑 Выбросить</button>`;
     }
 
     if (!mainBtn && !dangerBtn) return '';
@@ -1609,6 +1716,26 @@ function renderBottleStageActions(b, id) {
     ${mainBtn}
     ${dangerBtn}
   </div>`;
+}
+function chillOutWithCheck(bottleId, chillHours){
+  const MIN_HOURS = 12;
+  if(chillHours >= MIN_HOURS){
+    // всё ок, достаём без вопросов
+    chillOut(bottleId);
+    return;
+  }
+  const left = Math.max(0, MIN_HOURS - chillHours);
+  openModal(`
+    <h2>Рано доставать?</h2>
+    <div class="info-box">
+      Бутылка в холодильнике всего ${chillHours} ч. Рекомендуется подождать ещё ${left} ч (минимум 12 ч).
+    </div>
+    <p>Достать всё равно?</p>
+    <div class="actions">
+      <button class="ghost" onclick="openBottle(${bottleId})">Отмена</button>
+      <button class="primary" onclick="chillOut(${bottleId})">Всё равно достать</button>
+    </div>
+  `);
 }
 
 async function petCheckBottle(bottleId) {
