@@ -128,7 +128,7 @@ function renderBottles() {
       return `
         <div class="card" style="padding:8px;margin:6px 0;cursor:pointer" onclick="openBottle(${b.id})">
           <b>${esc(b.title||('#'+b.id))}</b> <span class="badge ${b.stage}">${STAGE_LABEL[b.stage]||b.stage}</span>
-          <div class="meta">${b.volume_ml||'?'} мл (${MATERIAL_LABEL[b.material]||b.material}) • залито ${b.filled_ml||'?'} мл • ρ финал ${b.density??'—'}</div>
+          <div class="meta">${b.volume_ml||'?'} мл (${MATERIAL_LABEL[b.material]||b.material}) • залито ${b.filled_ml||'?'} мл${b.abv != null ? ` • ≈ ${b.abv}% алкоголя` : ''}</div>
           ${b.additives && b.additives.length ? `<div class="meta">Добавки: ${b.additives.map(a=>esc(a.name)+' '+a.amount+UNIT_LABEL[a.unit]).join(', ')}</div>`:''}
         </div>
       `;
@@ -617,20 +617,16 @@ async function submitWizard() {
 }
 
 // ---------- Bottle edit ----------
-async function editBottle(id) {
-    const b = await api.get('/api/bottles/' + id);
-    openModal(`
-    <h2>Редактировать ${esc(b.title)}${b.material === 'pet' ? ' <span class="badge control">Контроль</span>' : ''}</h2>
-    <label>Объём бутылки, мл</label>
-    <input id="eb_vol" type="number" value="${b.volume_ml ?? ''}">
-    <label>Материал</label>
-    <input type="text" value="${MATERIAL_LABEL[b.material] || b.material}" disabled>
+async function editBottle(id){
+  const b = await api.get('/api/bottles/'+id);
+  openModal(`
+    <h2>Редактировать ${esc(b.title)}</h2>
+    <label>Тара</label>
+    <input type="text" value="${MATERIAL_LABEL[b.material]||b.material} ${b.volume_ml??''} мл" disabled>
     <label>Залито, мл</label>
-    <input id="eb_fill" type="number" value="${b.filled_ml ?? ''}">
-    <label>ρ финал, °Brix</label>
-    <input id="eb_dens" type="number" step="0.1" value="${b.density ?? ''}">
+    <input id="eb_fill" type="number" value="${b.filled_ml??''}">
     <label>Заметки</label>
-    <textarea id="eb_notes" rows="2">${esc(b.notes || '')}</textarea>
+    <textarea id="eb_notes" rows="2">${esc(b.notes||'')}</textarea>
     <div class="actions">
       <button class="ghost" onclick="closeModal()">Отмена</button>
       <button class="primary" onclick="saveBottle(${id})">Сохранить</button>
@@ -638,16 +634,13 @@ async function editBottle(id) {
   `);
 }
 
-async function saveBottle(id) {
-    const body = {
-        volume_ml: num('eb_vol'),
-        filled_ml: num('eb_fill'),
-        density: num('eb_dens'),
-        notes: v('eb_notes') || null,
-    };
-    await api.patch('/api/bottles/' + id, body);
-    closeModal();
-    refresh();
+async function saveBottle(id){
+  const body = {
+    filled_ml: num('eb_fill'),
+    notes: v('eb_notes') || null,
+  };
+  await api.patch('/api/bottles/'+id, body);
+  closeModal(); refresh();
 }
 
 async function deleteBottleFromList(id) {
@@ -900,7 +893,7 @@ async function finishF1Wizard(jarId) {
 
     window.finishF1AddBottleForm = () => {
         let tempAdditives = [];
-        let draft = {volume_ml: null, material: 'glass', filled_ml: null};
+        let draft = { volume_ml: 300, material: 'glass', filled_ml: null };
 
         function renderAdditivesBlock() {
             if (!tempAdditives.length) return '<div class="meta">Нет добавок</div>';
@@ -913,24 +906,21 @@ async function finishF1Wizard(jarId) {
       `).join('');
         }
 
-        function syncDraft() {
-            const volEl = document.getElementById('fb_vol');
-            const matEl = document.getElementById('fb_mat');
-            const fillEl = document.getElementById('fb_fill');
-            if (volEl) draft.volume_ml = volEl.value === '' ? null : parseFloat(volEl.value);
-            if (matEl) draft.material = matEl.value;
-            if (fillEl) draft.filled_ml = fillEl.value === '' ? null : parseFloat(fillEl.value);
-        }
+        function syncDraft(){
+      const matEl = document.getElementById('fb_mat');
+      const fillEl = document.getElementById('fb_fill');
+      draft.volume_ml = 300;
+      if(matEl) draft.material = matEl.value;
+      if(fillEl) draft.filled_ml = fillEl.value === '' ? null : parseFloat(fillEl.value);
+    }
 
-        function renderBottleForm() {
-            openModal(`
+            function renderBottleForm(){
+      openModal(`
         <h2>Новая бутылка</h2>
-        <label>Объём бутылки, мл</label><input id="fb_vol" type="number" value="${draft.volume_ml ?? ''}">
-        <label>Материал</label>
+        <label>Тара</label>
         <select id="fb_mat">
-          <option value="glass" ${draft.material === 'glass' ? 'selected' : ''}>Стекло</option>
-          <option value="pet" ${draft.material === 'pet' ? 'selected' : ''}>ПЭТ (контрольная)</option>
-          <option value="other" ${draft.material === 'other' ? 'selected' : ''}>Другое</option>
+          <option value="glass" ${draft.material==='glass'?'selected':''}>Стекло 300 мл</option>
+          <option value="pet" ${draft.material==='pet'?'selected':''}>ПЭТ 300 мл (контрольная)</option>
         </select>
         <label>Залито, мл</label><input id="fb_fill" type="number" value="${draft.filled_ml ?? ''}">
         <h3 style="margin-top:14px;font-size:14px">Добавки (необязательно)</h3>
@@ -943,7 +933,7 @@ async function finishF1Wizard(jarId) {
           <button class="primary" onclick="finishF1ConfirmBottle()">Добавить</button>
         </div>
       `);
-        }
+    }
 
         window.finishF1EditTempAdditiveForm = (idx) => {
             syncDraft();
@@ -1030,7 +1020,7 @@ async function finishF1Wizard(jarId) {
                 return;
             }
             if (!draft.volume_ml || !draft.filled_ml) {
-                alert('Заполните объём и залитое');
+                alert('Заполните «Залито, мл»'); return;
                 return;
             }
             const n = wizF1.bottles.length + 1;
@@ -1330,8 +1320,8 @@ async function openJar(id, fromBottleId) {
 
     const bottles = (j.bottles || []).map(b => `
     <div class="card" style="padding:8px;margin-bottom:6px" onclick="openBottle(${b.id})">
-            <b>${esc(b.title)}</b> <span class="badge ${b.stage}">${STAGE_LABEL[b.stage] || b.stage}</span>${b.material === 'pet' ? ' <span class="badge control">Контроль</span>' : ''}
-      <div class="meta">${b.volume_ml} мл (${MATERIAL_LABEL[b.material] || b.material}) • ρ финал ${b.density ?? '—'}</div>
+            <b>${esc(b.title)}</b> <span class="badge ${b.stage}">${STAGE_LABEL[b.stage] || b.stage}</span>
+      <div class="meta">${b.volume_ml} мл (${MATERIAL_LABEL[b.material] || b.material}) • залито ${b.filled_ml} мл</div>
       ${b.additives && b.additives.length ? `<div class="meta">Добавки: ${b.additives.map(a => esc(a.name) + ' ' + a.amount + UNIT_LABEL[a.unit]).join(', ')}</div>` : ''}
     </div>
   `).join('');
@@ -1358,10 +1348,7 @@ async function openJar(id, fromBottleId) {
     <div class="meta">ρ старт: ${j.rho_start!=null? j.rho_start+' °Brix' : '—'}${j.rho_final != null ? ' • ρ финал: ' + j.rho_final +' °Brix': ''}</div>
     <div class="meta">pH старт: ${j.ph ?? '—'}${j.final_ph != null ? ' • pH финал: ' + j.final_ph : ''}</div>
     ${j.state === 'bottled' ? `
-		${(()=>{
-        const abv = calcABV(j.rho_start, j.rho_final);
-        return abv != null ? `<div class="meta"><b>≈ ${abv}% алкоголя</b></div>` : '';
-      })()}
+		${j.abv != null ? `<div class="meta"><b>≈ ${j.abv}% алкоголя</b></div>` : ''}
       <div class="meta">Разлито: ${j.total_filled_ml} мл из ${j.total_in_ml} мл</div>
       <div class="meta">Остаток: <b>${j.leftover_ml} мл</b></div>
     ` : ''}
@@ -1397,47 +1384,46 @@ async function openJar(id, fromBottleId) {
   `);
 }
 
-function brixToSg(brix){
-  return (brix / (258.6 - (brix / 258.2) * 227.1)) + 1;
-}
 
-function calcABV(rhoStartBrix, rhoFinalBrix){
-  if(rhoStartBrix == null || rhoFinalBrix == null) return null;
-  const og = brixToSg(rhoStartBrix);
-  const fg = brixToSg(rhoFinalBrix);
-  if(og <= fg) return 0; // нет ферментации
-  const abv = (76.08 * (og - fg) / (1.775 - og)) * (fg / 0.794);
-  return Math.max(0, Math.round(abv * 10) / 10); // одна десятая
-}
+function renderJarHistory(events, jarId){
+  if(!events || !events.length) return '<li>нет событий</li>';
+  const sorted = [...events].sort((a,b)=> (a.created_at > b.created_at ? 1 : -1));
+  const EDITABLE = new Set(['ph', 'note']);
 
+  // какие типы событий показываем в истории
+  const VISIBLE = new Set([
+    'ph', 'note', 'created',
+    'f1_finished', 'bottled',
+    'new_cycle_started',
+  ]);
 
-function renderJarHistory(events, jarId) {
-    if (!events || !events.length) return '<li>нет событий</li>';
-    const sorted = [...events].sort((a, b) => (a.created_at > b.created_at ? 1 : -1));
-    const EDITABLE = new Set(['ph', 'note']);
+  const items = [];
+  for(const ev of sorted){
+    if(!VISIBLE.has(ev.event_type)) continue;
 
-    return sorted.map(ev => {
-        const p = ev.payload ? JSON.parse(ev.payload) : {};
-        let summary = ev.event_type;
+    const p = ev.payload ? JSON.parse(ev.payload) : {};
+    let summary = ev.event_type;
 
-        if (ev.event_type === 'ph') summary = `pH ${p.value ?? '?'}`;
-        else if (ev.event_type === 'note') summary = `«${esc(p.text || '')}»`;
-        else if (ev.event_type === 'created') summary = 'создание базы';
-        else if (ev.event_type === 'f1_finished') summary = `F1 завершена`;
-        else if (ev.event_type === 'bottled') summary = `розлив: ${p.bottles_count} бутылок, ${p.total_filled_ml} мл`;
-        else if (ev.event_type === 'f2_finished') summary = 'F2 завершена';
-        else if(ev.event_type==='new_cycle_started') summary = `запущен новый цикл: #${p.new_jar_id ?? '?'}`;
+    if(ev.event_type==='ph') summary = `pH ${p.value ?? '?'}`;
+    else if(ev.event_type==='note') summary = `«${esc(p.text||'')}»`;
+    else if(ev.event_type==='created') summary = 'создание базы';
+    else if(ev.event_type==='f1_finished') summary = `F1 завершена (pH ${p.final_ph}, ρ финал ${p.rho_final ?? '—'})`;
+    else if(ev.event_type==='bottled') summary = `розлив: ${p.bottles_count} бутылок, ${p.total_filled_ml} мл`;
+    else if(ev.event_type==='new_cycle_started') summary = `запущен новый цикл: #${p.new_jar_id ?? '?'}`;
 
-        const btns = EDITABLE.has(ev.event_type)
-            ? `<button class="ghost" onclick="editJarEvent(${ev.id}, ${jarId})">✏️</button>
+    const btns = EDITABLE.has(ev.event_type)
+      ? `<button class="ghost" onclick="editJarEvent(${ev.id}, ${jarId})">✏️</button>
          <button class="danger" onclick="deleteJarEvent(${ev.id}, ${jarId})">🗑</button>`
-            : '';
+      : '';
 
-        return `<li>
+    items.push(`<li>
       <span class="ev-text">${fmtDate(ev.created_at)} — ${summary}</span>
       <span>${btns}</span>
-    </li>`;
-    }).reverse().join('');
+    </li>`);
+  }
+
+  if(!items.length) return '<li>нет событий</li>';
+  return items.reverse().join('');
 }
 
 async function addJarEntry(jarId) {
@@ -1486,50 +1472,6 @@ async function submitJarEntry(jarId) {
     } catch (e) {
         alert('Ошибка: ' + e.message);
     }
-}
-
-async function addJarPh(jarId) {
-    openModal(`
-    <h2>Замер pH</h2>
-    <label>Значение</label><input id="ev_val" type="number" step="0.01" autofocus>
-    <div class="actions">
-      <button class="ghost" onclick="openJar(${jarId})">Назад</button>
-      <button class="primary" onclick="submitJarPh(${jarId})">Сохранить</button>
-    </div>
-  `);
-}
-
-async function submitJarPh(jarId) {
-    const val = num('ev_val');
-    if (val === null || isNaN(val)) {
-        alert('Введите число');
-        return;
-    }
-    await api.post('/api/events', {entity_type: 'jar', entity_id: jarId, event_type: 'ph', payload: {value: val}});
-    await refresh();
-    openJar(jarId, currentJarOrigin);
-}
-
-async function addJarNote(jarId) {
-    openModal(`
-    <h2>Заметка</h2>
-    <label>Текст</label><textarea id="ev_text" rows="3" autofocus></textarea>
-    <div class="actions">
-      <button class="ghost" onclick="openJar(${jarId})">Назад</button>
-      <button class="primary" onclick="submitJarNote(${jarId})">Сохранить</button>
-    </div>
-  `);
-}
-
-async function submitJarNote(jarId) {
-    const text = v('ev_text');
-    if (!text) {
-        alert('Введите текст');
-        return;
-    }
-    await api.post('/api/events', {entity_type: 'jar', entity_id: jarId, event_type: 'note', payload: {text}});
-    await refresh();
-    openJar(jarId, currentJarOrigin);
 }
 
 async function editJarEvent(eid, jarId) {
@@ -1617,7 +1559,7 @@ async function openBottle(id) {
         if (e.event_type === 'additive_added') summary = `добавка: ${esc(p.name)} ${p.amount}${UNIT_LABEL[p.unit] || ''}`;
         else if (e.event_type === 'additive_removed') summary = `удалена добавка: ${esc(p.name || '')}`;
         else if (e.event_type === 'bottled') summary = 'бутылка создана';
-        else if (e.event_type === 'f2_finished') summary = `F2 завершена (карб. ${p.carbonation || '?'})`;
+        else if (e.event_type === 'f2_finished') summary = `F2 завершена`;
         else if (e.event_type === 'pet_check') summary = `проверка ПЭТ: ${p.bubbled ? 'надулась' : 'ещё нет'}`;
         else if (e.event_type === 'chill_out') summary = 'достали из холодильника';
         else if (e.event_type === 'discarded') summary = `🗑 выброшено: ${esc(p.reason || 'без причины')}`;
@@ -1662,7 +1604,10 @@ async function openBottle(id) {
       <b>Партия: ${b.jar ? esc(b.jar.title) : '—'}</b>
       ${b.jar ? `<div class="meta">${fmtDate(b.jar.created_at)}</div>` : ''}
     </div>
-    <div class="meta">${b.volume_ml} мл (${MATERIAL_LABEL[b.material] || b.material}) • залито ${b.filled_ml} мл • ρ финал ${b.density ?? '—'} °Brix</div>
+    <div class="meta">${b.volume_ml} мл (${MATERIAL_LABEL[b.material]||b.material}) • залито ${b.filled_ml} мл</div>
+    ${b.abv != null ? `<div class="meta">≈ ${b.abv}% алкоголя</div>` : ''}
+    ${b.carbonation != null ? `<div class="meta">Карбонизация: ${'★'.repeat(b.carbonation)}${'☆'.repeat(5 - b.carbonation)}</div>` : ''}
+    ${b.sediment != null ? `<div class="meta">Осадок: ${b.sediment ? 'да' : 'нет'}${b.sediment_note ? ' ('+esc(b.sediment_note)+')' : ''}</div>` : ''}
     ${b.chill_hours != null ? `<div class="meta">В холодильнике: ${b.chill_hours} ч</div>` : ''}
 
     ${actionsHtml}

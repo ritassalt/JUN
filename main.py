@@ -57,6 +57,7 @@ def init_db():
             ph REAL,
             final_ph REAL,
             rho_final REAL,
+            abv REAL,
             f1_start TEXT,
             f1_end TEXT,
             state TEXT NOT NULL DEFAULT 'f1',
@@ -72,6 +73,7 @@ def init_db():
             material TEXT,
             filled_ml REAL,
             density REAL,
+            abv REAL,
             stage TEXT NOT NULL DEFAULT 'f2',
             notes TEXT,
             has_additives INTEGER DEFAULT 0,
@@ -140,6 +142,25 @@ def make_jar_title(conn, jar_id, honeytee_id):
     return " · ".join(parts)
 
 
+# ---------- ABV ----------
+def brix_to_sg(brix: float) -> float:
+    return (brix / (258.6 - (brix / 258.2) * 227.1)) + 1.0
+
+
+def calc_abv(rho_start_brix, rho_final_brix):
+    if rho_start_brix is None or rho_final_brix is None:
+        return None
+    try:
+        og = brix_to_sg(float(rho_start_brix))
+        fg = brix_to_sg(float(rho_final_brix))
+    except Exception:
+        return None
+    if og <= fg:
+        return 0.0
+    abv = (76.08 * (og - fg) / (1.775 - og)) * (fg / 0.794)
+    return round(max(0.0, abv), 1)
+
+
 # ---------- Backup ----------
 
 def dump_all():
@@ -202,7 +223,7 @@ class JarIn(BaseModel):
 class JarFinishF1In(BaseModel):
     final_ph: float
     rho_final: Optional[float] = None
-    bottles: list[dict]  # [{volume_ml, material, filled_ml, additives: [...]}]
+    bottles: list[dict]
 
 
 class AdditiveIn(BaseModel):
@@ -282,7 +303,6 @@ def compute_jar_reminder(j):
 
 
 def enrich_jar(j, conn):
-    """Дополняет jar полями: honeytee, bottles, rho_start, total_in/filled/leftover."""
     d = dict(j)
     d["reminder"] = compute_jar_reminder(d)
     h = conn.execute("SELECT * FROM honeytee WHERE id=?", (j["honeytee_id"],)).fetchone()
@@ -437,15 +457,6 @@ def create_jar(payload: JarIn):
 
         return enrich_jar(row_to_dict(conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()), conn)
 
-@app.post("/api/jars/{jid}/force_f2_ready")
-def force_f2_ready(jid: int):
-    with db() as conn:
-        j = conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()
-        if not j:
-            raise HTTPException(404, "jar not found")
-        conn.execute("UPDATE jar SET f2_force_ready=1 WHERE id=?", (jid,))
-        log_event(conn, "jar", jid, j["state"], "f2_force_ready")
-        return {"ok": True}
 
 @app.delete("/api/jars/{jid}")
 def delete_jar(jid: int):
@@ -472,21 +483,24 @@ def finish_f1(jid: int, payload: JarFinishF1In):
             raise HTTPException(404, "jar not found")
         if row["state"] != "f1":
             raise HTTPException(400, "база не в состоянии F1")
-        h = conn.execute("SELECT mead_ml FROM honeytee WHERE id=?", (row["honeytee_id"],)).fetchone()
+        h = conn.execute("SELECT mead_ml, density FROM honeytee WHERE id=?", (row["honeytee_id"],)).fetchone()
         mead_ml = (h["mead_ml"] or 0) if h else 0
+        rho_start = (h["density"] if h else None)
         starter_ml = row["starter_ml"] or 0
         total_in = mead_ml + starter_ml
         total_filled = sum((b.get("filled_ml") or 0) for b in payload.bottles)
         if total_filled > total_in:
             raise HTTPException(400, f"Разлито {total_filled} мл больше, чем есть в базе ({total_in} мл)")
 
+        abv = calc_abv(rho_start, payload.rho_final)
+
         now = now_iso()
         conn.execute(
-            "UPDATE jar SET state='bottled', f1_end=?, final_ph=?, rho_final=? WHERE id=?",
-            (now, payload.final_ph, payload.rho_final, jid),
+            "UPDATE jar SET state='bottled', f1_end=?, final_ph=?, rho_final=?, abv=? WHERE id=?",
+            (now, payload.final_ph, payload.rho_final, abv, jid),
         )
         log_event(conn, "jar", jid, "f1", "f1_finished",
-                  {"final_ph": payload.final_ph, "rho_final": payload.rho_final})
+                  {"final_ph": payload.final_ph, "rho_final": payload.rho_final, "abv": abv})
 
         # 1) создаём все бутылки без pet_bottle_id
         created_ids = []
@@ -495,11 +509,11 @@ def finish_f1(jid: int, payload: JarFinishF1In):
             cur = conn.execute(
                 """INSERT INTO bottles
                    (jar_id, created_at, title, volume_ml, material, filled_ml, density,
-                    stage, notes, has_additives, additives, f2_start)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    stage, notes, has_additives, additives, f2_start, abv)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (jid, now, title, b.get("volume_ml"), b.get("material"),
-                 b.get("filled_ml"), payload.rho_final, "f2", None,
-                 0, "[]", now),
+                 b.get("filled_ml"), None, "f2", None,
+                 0, "[]", now, abv),
             )
             bid = cur.lastrowid
             created_ids.append((bid, b.get("material")))
@@ -510,7 +524,6 @@ def finish_f1(jid: int, payload: JarFinishF1In):
             })
             # добавки
             for a in (b.get("additives") or []):
-                current = json.loads("[]")
                 conn.execute(
                     "UPDATE bottles SET additives=?, has_additives=1 WHERE id=?",
                     (json.dumps([a], ensure_ascii=False), bid),
@@ -550,6 +563,17 @@ def new_cycle_hint(jid: int):
         return {"available_honeytee": [row_to_dict(r) for r in available]}
 
 
+@app.post("/api/jars/{jid}/force_f2_ready")
+def force_f2_ready(jid: int):
+    with db() as conn:
+        j = conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()
+        if not j:
+            raise HTTPException(404, "jar not found")
+        conn.execute("UPDATE jar SET f2_force_ready=1 WHERE id=?", (jid,))
+        log_event(conn, "jar", jid, j["state"], "f2_force_ready")
+        return {"ok": True}
+
+
 # ---------- bottles ----------
 
 @app.get("/api/bottles")
@@ -577,7 +601,6 @@ def get_bottle(bid: int):
         d["events"] = [row_to_dict(e) for e in events]
         j = conn.execute("SELECT * FROM jar WHERE id=?", (b["jar_id"],)).fetchone()
         d["jar"] = row_to_dict(j) if j else None
-        # ПЭТ-бутылка партии
         if b["pet_bottle_id"]:
             pet = conn.execute("SELECT * FROM bottles WHERE id=?", (b["pet_bottle_id"],)).fetchone()
             d["pet_bottle"] = bottle_to_dict(pet) if pet else None
@@ -597,7 +620,7 @@ def patch_bottle(bid: int, payload: BottleIn):
         if row["stage"] != "f2" and not row["has_additives"]:
             raise HTTPException(409, "Нельзя редактировать бутылку без добавок после F2")
         upd = {}
-        for k in ("volume_ml", "filled_ml", "density", "notes"):
+        for k in ("filled_ml", "notes"):
             v = getattr(payload, k)
             if v is not None: upd[k] = v
         if not upd:
@@ -614,7 +637,6 @@ def delete_bottle(bid: int):
         row = conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone()
         if not row:
             raise HTTPException(404, "bottle not found")
-        # если это ПЭТ — проверим сёстер
         if row["material"] == "pet":
             sisters = conn.execute(
                 "SELECT COUNT(*) c FROM bottles WHERE jar_id=? AND id!=?",
@@ -885,5 +907,4 @@ def index():
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
