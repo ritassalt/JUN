@@ -65,6 +65,13 @@ function v(id) {
 	return document.getElementById(id).value.trim();
 }
 
+function humanDays(n) {
+	if (n === 0) return 'сегодня';
+	if (n === 1) return '1 день назад';
+	if (n < 5) return `${n} дня назад`;
+	return `${n} дней назад`;
+}
+
 // ---------- Refresh / Tabs ----------
 async function refresh() {
 	[state.bottles, state.jars, state.honeytee, state.notes] = await Promise.all([
@@ -152,6 +159,10 @@ function renderBottles() {
 			} else {
 				petLabel = `<span class="badge control">ПЭТ контроль</span>`;
 			}
+			if (pet.pet_last_check) {
+				const days = Math.floor((Date.now() - new Date(pet.pet_last_check).getTime()) / (1000*60*60*24));
+				petLabel += ` <span class="meta" style="display:inline">проверена ${humanDays(days)}</span>`;
+			}
 		}
 
 		const st2 = f2Status(g, state.jars);
@@ -172,7 +183,7 @@ function renderBottles() {
           <span class="group-meta">${count} ${count === 1 ? 'бутылка' : (count < 5 ? 'бутылки' : 'бутылок')} • ${fmtDateOnly(firstDate)}</span>
         </summary>
         <div class="group-body">
-          ${statusBadge ? `<div style="margin:4px 0 8px">${statusBadge}</div>` : ''}
+          ${statusBadge ? `<div style="margin:4px 0 8px">${statusBadge} ${petLabel}</div>` : (petLabel ? `<div style="margin:4px 0 8px">${petLabel}</div>` : '')}
           ${list}
           ${finishBtn}
         </div>
@@ -681,6 +692,7 @@ async function openBottle(id) {
 		else if (e.event_type === 'stage_changed') summary = `стадия → ${e.stage}`;
 		else if (e.event_type === 'note') summary = `«${esc(p.text || '')}»`;
 		else if (e.event_type === 'tasting') summary = `🍷 ${p.rating ? '★'.repeat(p.rating) + '☆'.repeat(5 - p.rating) + ' · ' : ''}${esc(p.note || 'без комментария')}`;
+		else if (e.event_type === 'edited') summary = `правка: залито → ${p.filled_ml}`;
 
 		const btns = BOTTLE_EDITABLE.has(e.event_type)
 			? `<button class="ghost" onclick="editBottleEvent(${e.id}, ${id})">✏️</button>
@@ -733,6 +745,7 @@ async function openBottle(id) {
     ${b.carbonation != null ? `<div class="meta">Карбонизация: ${'★'.repeat(b.carbonation)}${'☆'.repeat(5 - b.carbonation)}</div>` : ''}
     ${b.sediment != null ? `<div class="meta">Осадок: ${b.sediment ? 'да' : 'нет'}${b.sediment_note ? ' (' + esc(b.sediment_note) + ')' : ''}</div>` : ''}
     ${b.chill_hours != null ? `<div class="meta">В холодильнике: ${b.chill_hours} ч</div>` : ''}
+    ${b.pet_last_check ? `<div class="meta">Последняя проверка ПЭТ: ${fmtDate(b.pet_last_check)} (${humanDays(Math.floor((Date.now() - new Date(b.pet_last_check).getTime())/(1000*60*60*24)))})</div>` : ''}
 
     ${actionsHtml}
 
@@ -798,8 +811,6 @@ async function editBottle(id) {
     <input type="text" value="${MATERIAL_LABEL[b.material] || b.material} ${b.volume_ml ?? ''} мл" disabled>
     <label>Залито, мл</label>
     <input id="eb_fill" type="number" value="${b.filled_ml ?? ''}">
-    <label>Заметки</label>
-    <textarea id="eb_notes" rows="2">${esc(b.notes || '')}</textarea>
     <div class="actions">
       <button class="ghost" onclick="closeModal()">Отмена</button>
       <button class="primary" onclick="saveBottle(${id})">Сохранить</button>
@@ -922,7 +933,6 @@ async function deleteBottleEvent(eid, bottleId) {
 async function saveBottle(id) {
 	const body = {
 		filled_ml: num('eb_fill'),
-		notes: v('eb_notes') || null,
 	};
 	await api.patch('/api/bottles/' + id, body);
 	closeModal();

@@ -23,6 +23,12 @@ MAX_BACKUPS = 3
 VALID_STAGES = {"f2", "f3", "chilling", "stored", "consumed", "discarded"}
 VALID_MATERIALS = {"glass", "pet", "other"}
 VALID_UNITS = {"g", "ml", "pcs"}
+VALID_EVENT_TYPES = {
+    "created", "edited", "note", "ph", "tasting", "discarded",
+    "additive_added", "additive_edited", "additive_removed",
+    "bottled", "f1_finished", "f2_finished", "f2_force_ready",
+    "pet_check", "chill_out", "stage_changed", "new_cycle_started",
+}
 JAR_CAPACITY_ML = 2300
 
 
@@ -73,10 +79,8 @@ def init_db():
             volume_ml REAL,
             material TEXT,
             filled_ml REAL,
-            density REAL,
             abv REAL,
             stage TEXT NOT NULL DEFAULT 'f2',
-            notes TEXT,
             has_additives INTEGER DEFAULT 0,
             additives TEXT,
             f2_start TEXT,
@@ -98,10 +102,6 @@ def init_db():
             event_type TEXT NOT NULL,
             payload TEXT,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS counters (
-            name TEXT PRIMARY KEY,
-            value INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,8 +133,10 @@ def make_honeytee_title(created_at_iso, tea_type, honey_type):
     except Exception:
         date_part = created_at_iso
     parts = [date_part]
-    if tea_type: parts.append(str(tea_type).strip())
-    if honey_type: parts.append(str(honey_type).strip())
+    if tea_type and str(tea_type).strip():
+        parts.append(str(tea_type).strip())
+    if honey_type and str(honey_type).strip():
+        parts.append(str(honey_type).strip())
     return " · ".join(parts)
 
 
@@ -172,7 +174,7 @@ def calc_abv(rho_start_brix, rho_final_brix):
 def dump_all():
     with db() as conn:
         return {t: [row_to_dict(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall()]
-                for t in ("honeytee", "jar", "bottles", "events", "counters", "notes")}
+                for t in ("honeytee", "jar", "bottles", "events", "notes")}
 
 
 def make_backup():
@@ -188,10 +190,15 @@ def make_backup():
 
 def restore_from(data):
     with db() as conn:
-        for t in ("events", "bottles", "jar", "honeytee", "counters", "notes"):
+        for t in ("events", "bottles", "jar", "honeytee", "notes"):
             conn.execute(f"DELETE FROM {t}")
-        for t in ("honeytee", "jar", "bottles", "events", "counters", "notes"):
+        for t in ("honeytee", "jar", "bottles", "events", "notes"):
             for row in data.get(t, []):
+                # пропускаем поля, которых нет в текущей схеме (обратная совместимость бэкапов)
+                valid_cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({t})").fetchall()}
+                row = {k: v for k, v in row.items() if k in valid_cols}
+                if not row:
+                    continue
                 cols = ",".join(row.keys())
                 qs = ",".join("?" * len(row))
                 conn.execute(f"INSERT INTO {t}({cols}) VALUES({qs})", list(row.values()))
@@ -241,10 +248,7 @@ class AdditiveIn(BaseModel):
 
 
 class BottleIn(BaseModel):
-    volume_ml: Optional[float] = None
     filled_ml: Optional[float] = None
-    density: Optional[float] = None
-    notes: Optional[str] = None
 
 
 class EventIn(BaseModel):
@@ -398,9 +402,9 @@ def patch_honeytee(hid: int, payload: HoneyteeIn):
         for k, v in payload.model_dump().items():
             upd[k] = v  # даже None
 
-        # title пересчитываем
-        tea = upd.get("tea_type") or row["tea_type"] or ""
-        honey = upd.get("honey_type") or row["honey_type"] or ""
+        # title пересчитываем, используя новые значения (в т.ч. None) — не подставляем старые
+        tea = upd.get("tea_type")
+        honey = upd.get("honey_type")
         upd["title"] = make_honeytee_title(row["created_at"], tea, honey)
 
         sets = ", ".join(f"{k}=?" for k in upd)
@@ -468,6 +472,18 @@ def create_jar(payload: JarIn):
         used = conn.execute("SELECT COUNT(*) c FROM jar WHERE honeytee_id=?", (payload.honeytee_id,)).fetchone()["c"]
         if used:
             raise HTTPException(409, "Этот медочай уже использован для другой базы")
+
+        # валидация родителя для нового цикла
+        parent = None
+        if payload.from_jar_id:
+            parent = conn.execute("SELECT * FROM jar WHERE id=?", (payload.from_jar_id,)).fetchone()
+            if not parent:
+                raise HTTPException(404, f"Родительская база #{payload.from_jar_id} не найдена")
+            if parent["state"] != "bottled":
+                raise HTTPException(409, "Родительская база должна быть в состоянии «разлито»")
+            if parent["next_cycle_started"]:
+                raise HTTPException(409, "Из этой базы уже запущен новый цикл")
+
         created = now_iso()
         cur = conn.execute(
             """INSERT INTO jar
@@ -480,14 +496,11 @@ def create_jar(payload: JarIn):
         conn.execute("UPDATE jar SET title=? WHERE id=?", (title, jid))
         log_event(conn, "jar", jid, "f1", "created", payload.model_dump())
 
-        # помечаем родительскую базу как «из неё запущен цикл»
-        if payload.from_jar_id:
-            parent = conn.execute("SELECT * FROM jar WHERE id=?", (payload.from_jar_id,)).fetchone()
-            if parent:
-                conn.execute("UPDATE jar SET next_cycle_started=1 WHERE id=?", (payload.from_jar_id,))
-                log_event(conn, "jar", payload.from_jar_id, parent["state"], "new_cycle_started", {
-                    "new_jar_id": jid,
-                })
+        if parent:
+            conn.execute("UPDATE jar SET next_cycle_started=1 WHERE id=?", (payload.from_jar_id,))
+            log_event(conn, "jar", payload.from_jar_id, parent["state"], "new_cycle_started", {
+                "new_jar_id": jid,
+            })
 
         return enrich_jar(row_to_dict(conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()), conn)
 
@@ -542,11 +555,11 @@ def finish_f1(jid: int, payload: JarFinishF1In):
             title = f"#{jid}.{idx}"
             cur = conn.execute(
                 """INSERT INTO bottles
-                   (jar_id, created_at, title, volume_ml, material, filled_ml, density,
-                    stage, notes, has_additives, additives, f2_start, abv)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (jar_id, created_at, title, volume_ml, material, filled_ml,
+                    stage, has_additives, additives, f2_start, abv)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (jid, now, title, b.get("volume_ml"), b.get("material"),
-                 b.get("filled_ml"), None, "f2", None,
+                 b.get("filled_ml"), "f2", None,
                  0, "[]", now, abv),
             )
             bid = cur.lastrowid
@@ -701,9 +714,8 @@ def patch_bottle(bid: int, payload: BottleIn):
         if row["stage"] != "f2" and not row["has_additives"]:
             raise HTTPException(409, "Нельзя редактировать бутылку без добавок после F2")
         upd = {}
-        for k in ("filled_ml", "notes"):
-            v = getattr(payload, k)
-            if v is not None: upd[k] = v
+        if payload.filled_ml is not None:
+            upd["filled_ml"] = payload.filled_ml
         if not upd:
             raise HTTPException(400, "no fields to update")
         sets = ", ".join(f"{k}=?" for k in upd)
@@ -861,6 +873,8 @@ def finish_f2(jid: int, payload: JarFinishF2In):
             conn.execute(f"UPDATE bottles SET {sets} WHERE id=?", (*updates.values(), b["id"]))
             log_event(conn, "bottle", b["id"], new_stage, "f2_finished",
                       {"carbonation": payload.carbonation, "sediment": payload.sediment})
+        # сбрасываем форс-флаг — F2 завершён
+        conn.execute("UPDATE jar SET f2_force_ready=0 WHERE id=?", (jid,))
         log_event(conn, "jar", jid, "f2", "f2_finished", payload.model_dump())
         return {"ok": True}
 
@@ -905,6 +919,8 @@ def set_bottle_stage(bid: int, payload: dict):
 def add_event(payload: EventIn):
     if payload.entity_type not in ("jar", "bottle", "honeytee"):
         raise HTTPException(400, "invalid entity_type")
+    if payload.event_type not in VALID_EVENT_TYPES:
+        raise HTTPException(400, f"invalid event_type, allowed: {sorted(VALID_EVENT_TYPES)}")
     table = {"jar": "jar", "bottle": "bottles", "honeytee": "honeytee"}[payload.entity_type]
     with db() as conn:
         if not conn.execute(f"SELECT id FROM {table} WHERE id=?", (payload.entity_id,)).fetchone():
@@ -928,6 +944,8 @@ def list_events(entity_type: Optional[str] = None, entity_id: Optional[int] = No
 
 @app.patch("/api/events/{eid}")
 def patch_event(eid: int, payload: EventPatch):
+    if payload.event_type is not None and payload.event_type not in VALID_EVENT_TYPES:
+        raise HTTPException(400, f"invalid event_type, allowed: {sorted(VALID_EVENT_TYPES)}")
     with db() as conn:
         if not conn.execute("SELECT id FROM events WHERE id=?", (eid,)).fetchone():
             raise HTTPException(404, "event not found")
