@@ -570,12 +570,14 @@ def finish_f1(jid: int, payload: JarFinishF1In):
                 "filled_ml": b.get("filled_ml"),
             })
             # добавки
-            for a in (b.get("additives") or []):
+            adds = b.get("additives") or []
+            if adds:
                 conn.execute(
                     "UPDATE bottles SET additives=?, has_additives=1 WHERE id=?",
-                    (json.dumps([a], ensure_ascii=False), bid),
+                    (json.dumps(adds, ensure_ascii=False), bid),
                 )
-                log_event(conn, "bottle", bid, "f2", "additive_added", a)
+                for a in adds:
+                    log_event(conn, "bottle", bid, "f2", "additive_added", a)
 
         # 2) находим ПЭТ и проставляем ссылки
         pet_id = None
@@ -857,6 +859,8 @@ def finish_f2(jid: int, payload: JarFinishF2In):
         bottles = conn.execute("SELECT * FROM bottles WHERE jar_id=?", (jid,)).fetchall()
         if not bottles:
             raise HTTPException(400, "у партии нет бутылок")
+        if not any(b["stage"] == "f2" for b in bottles):
+            raise HTTPException(409, "F2 уже завершён для этой партии")
         for b in bottles:
             has_add = bool(b["has_additives"])
             new_stage = "f3" if has_add else "chilling"
