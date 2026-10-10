@@ -23,7 +23,7 @@ MAX_BACKUPS = 3
 VALID_STAGES = {"f2", "f3", "chilling", "stored", "consumed", "discarded"}
 VALID_MATERIALS = {"glass", "pet", "other"}
 VALID_UNITS = {"g", "ml", "pcs"}
-JAR_CAPACITY_ML = 1500
+JAR_CAPACITY_ML = 2300
 
 
 def db():
@@ -43,6 +43,7 @@ def init_db():
             tea_type TEXT,
             tea_g REAL,
             tea_temp REAL,
+            tea_steep_min REAL,
             honey_type TEXT,
             honey_g REAL,
             mead_ml REAL,
@@ -101,6 +102,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS counters (
             name TEXT PRIMARY KEY,
             value INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            text TEXT NOT NULL
         );
         """)
 
@@ -166,7 +172,7 @@ def calc_abv(rho_start_brix, rho_final_brix):
 def dump_all():
     with db() as conn:
         return {t: [row_to_dict(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall()]
-                for t in ("honeytee", "jar", "bottles", "events", "counters")}
+                for t in ("honeytee", "jar", "bottles", "events", "counters", "notes")}
 
 
 def make_backup():
@@ -182,9 +188,9 @@ def make_backup():
 
 def restore_from(data):
     with db() as conn:
-        for t in ("events", "bottles", "jar", "honeytee", "counters"):
+        for t in ("events", "bottles", "jar", "honeytee", "counters", "notes"):
             conn.execute(f"DELETE FROM {t}")
-        for t in ("honeytee", "jar", "bottles", "events", "counters"):
+        for t in ("honeytee", "jar", "bottles", "events", "counters", "notes"):
             for row in data.get(t, []):
                 cols = ",".join(row.keys())
                 qs = ",".join("?" * len(row))
@@ -207,6 +213,7 @@ class HoneyteeIn(BaseModel):
     tea_type: Optional[str] = None
     tea_g: Optional[float] = None
     tea_temp: Optional[float] = None
+    tea_steep_min: Optional[float] = None
     honey_type: Optional[str] = None
     honey_g: Optional[float] = None
     mead_ml: Optional[float] = None
@@ -261,6 +268,14 @@ class JarFinishF2In(BaseModel):
     carbonation: int
     sediment: bool
     sediment_note: Optional[str] = None
+
+
+class NoteIn(BaseModel):
+    text: str
+
+
+class NotePatch(BaseModel):
+    text: str
 
 
 # ---------- helpers ----------
@@ -330,6 +345,7 @@ def list_honeytee():
         for r in rows:
             d = row_to_dict(r)
             used = conn.execute("SELECT COUNT(*) c FROM jar WHERE honeytee_id=?", (r["id"],)).fetchone()["c"]
+            d["is_draft"] = is_draft(d)
             d["used"] = used > 0
             result.append(d)
         return result
@@ -343,24 +359,23 @@ def get_honeytee(hid: int):
             raise HTTPException(404, "honeytee not found")
         d = row_to_dict(r)
         used = conn.execute("SELECT COUNT(*) c FROM jar WHERE honeytee_id=?", (hid,)).fetchone()["c"]
+        d["is_draft"] = is_draft(d)
         d["used"] = used > 0
         return d
 
 
 @app.post("/api/honeytee")
 def create_honeytee(payload: HoneyteeIn):
-    for f in ("tea_type", "tea_g", "tea_temp", "honey_type", "honey_g", "mead_ml"):
-        v = getattr(payload, f)
-        if v is None or (isinstance(v, str) and not v.strip()):
-            raise HTTPException(400, f"Поле «{f}» обязательно")
     created = now_iso()
     title = make_honeytee_title(created, payload.tea_type, payload.honey_type)
     with db() as conn:
         cur = conn.execute(
             """INSERT INTO honeytee
-               (created_at, title, tea_type, tea_g, tea_temp, honey_type, honey_g, mead_ml, density)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (created_at, title, tea_type, tea_g, tea_temp, tea_steep_min,
+                honey_type, honey_g, mead_ml, density)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (created, title, payload.tea_type, payload.tea_g, payload.tea_temp,
+             payload.tea_steep_min,
              payload.honey_type, payload.honey_g, payload.mead_ml, payload.density),
         )
         hid = cur.lastrowid
@@ -377,14 +392,31 @@ def patch_honeytee(hid: int, payload: HoneyteeIn):
         used = conn.execute("SELECT COUNT(*) c FROM jar WHERE honeytee_id=?", (hid,)).fetchone()["c"]
         if used:
             raise HTTPException(409, "Нельзя редактировать медочай: по нему уже создана база")
-        upd = {k: v for k, v in payload.model_dump().items() if v is not None}
-        tea = upd.get("tea_type", row["tea_type"])
-        honey = upd.get("honey_type", row["honey_type"])
+
+        # ВСЕ поля медочая могут быть обнулены — берём их из payload как есть
+        upd = {}
+        for k, v in payload.model_dump().items():
+            upd[k] = v  # даже None
+
+        # title пересчитываем
+        tea = upd.get("tea_type") or row["tea_type"] or ""
+        honey = upd.get("honey_type") or row["honey_type"] or ""
         upd["title"] = make_honeytee_title(row["created_at"], tea, honey)
+
         sets = ", ".join(f"{k}=?" for k in upd)
         conn.execute(f"UPDATE honeytee SET {sets} WHERE id=?", (*upd.values(), hid))
         log_event(conn, "honeytee", hid, None, "edited", upd)
         return row_to_dict(conn.execute("SELECT * FROM honeytee WHERE id=?", (hid,)).fetchone())
+
+
+def is_draft(h):
+    required = ("tea_type", "tea_g", "tea_temp", "tea_steep_min",
+                "honey_type", "honey_g", "mead_ml")
+    for f in required:
+        v = h.get(f)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return True
+    return False
 
 
 @app.delete("/api/honeytee/{hid}")
@@ -431,6 +463,8 @@ def create_jar(payload: JarIn):
         h = conn.execute("SELECT * FROM honeytee WHERE id=?", (payload.honeytee_id,)).fetchone()
         if not h:
             raise HTTPException(400, "honeytee not found")
+        if is_draft(row_to_dict(h)):
+            raise HTTPException(409, "Нельзя создать базу из черновика медочая")
         used = conn.execute("SELECT COUNT(*) c FROM jar WHERE honeytee_id=?", (payload.honeytee_id,)).fetchone()["c"]
         if used:
             raise HTTPException(409, "Этот медочай уже использован для другой базы")
@@ -571,6 +605,53 @@ def force_f2_ready(jid: int):
             raise HTTPException(404, "jar not found")
         conn.execute("UPDATE jar SET f2_force_ready=1 WHERE id=?", (jid,))
         log_event(conn, "jar", jid, j["state"], "f2_force_ready")
+        return {"ok": True}
+
+
+# ---------- notes ----------
+
+@app.get("/api/notes")
+def list_notes():
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM notes ORDER BY id DESC").fetchall()
+        return [row_to_dict(r) for r in rows]
+
+
+@app.post("/api/notes")
+def create_note(payload: NoteIn):
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Текст не может быть пустым")
+    if len(text) > 10000:
+        raise HTTPException(400, "Текст слишком длинный (максимум 10 000 символов)")
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO notes(created_at, text) VALUES (?, ?)",
+            (now_iso(), text),
+        )
+        return row_to_dict(conn.execute("SELECT * FROM notes WHERE id=?", (cur.lastrowid,)).fetchone())
+
+
+@app.patch("/api/notes/{nid}")
+def patch_note(nid: int, payload: NotePatch):
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Текст не может быть пустым")
+    if len(text) > 10000:
+        raise HTTPException(400, "Текст слишком длинный (максимум 10 000 символов)")
+    with db() as conn:
+        if not conn.execute("SELECT id FROM notes WHERE id=?", (nid,)).fetchone():
+            raise HTTPException(404, "note not found")
+        conn.execute("UPDATE notes SET text=? WHERE id=?", (text, nid))
+        return row_to_dict(conn.execute("SELECT * FROM notes WHERE id=?", (nid,)).fetchone())
+
+
+@app.delete("/api/notes/{nid}")
+def delete_note(nid: int):
+    with db() as conn:
+        if not conn.execute("SELECT id FROM notes WHERE id=?", (nid,)).fetchone():
+            raise HTTPException(404, "note not found")
+        conn.execute("DELETE FROM notes WHERE id=?", (nid,))
         return {"ok": True}
 
 
@@ -907,4 +988,5 @@ def index():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
