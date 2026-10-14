@@ -171,7 +171,7 @@ function renderBottles() {
 		let finishBtn = '';
 		if (st2 && st2.kind === 'ready') {
 			statusBadge = `<span class="badge f2-ready">Время подошло</span>`;
-			finishBtn = `<div class="row" style="margin:8px 0"><button class="primary" style="flex:1" onclick="finishF2Wizard(${g.jar_id})">Завершить F2 партии</button></div>`;
+			finishBtn = `<div class="row" style="margin:8px 0"><button class="primary" style="flex:1" onclick="finishF2(${g.jar_id})">Завершить F2 партии</button></div>`;
 		} else if (st2 && st2.kind === 'carbonating') {
 			statusBadge = `<span class="badge f2-carbonating" style="cursor:pointer" onclick="event.stopPropagation(); event.preventDefault(); f2StatusClick(${g.jar_id}, ${st2.pet ? st2.pet.id : 0})">Карбонизируемся...</span>`;
 		}
@@ -210,7 +210,6 @@ function renderJars() {
         </div>
         <div class="row" style="margin-top:8px">
           ${j.state === 'f1' ? `<button class="primary" onclick="finishF1Wizard(${j.id})">Завершить F1</button>` : ''}
-          ${(j.state === 'bottled' && !j.next_cycle_started) ? `<button class="primary" onclick="newCycle(${j.id})">Новый цикл</button>` : ''}
           ${(!j.bottles || j.bottles.length === 0) ? `<button class="danger" onclick="deleteJar(${j.id})">🗑 Удалить</button>` : ''}
         </div>
       </div>
@@ -367,6 +366,7 @@ const FIELD_DEFS = {
 		fields: [
 			{key: 'honeytee_id', label: 'Медочай', type: 'honeytee_select', required: true},
 			{key: 'starter_ml', label: 'Объём стартера, мл', type: 'number', step: '1', required: true},
+			{key: 'cleaned', label: 'Лимонадница очищена от осадка', type: 'checkbox'},
 			{key: '__warn_volume', label: 'Проверить объём', type: 'warn'},
 			{
 				key: '__info_pour',
@@ -406,7 +406,11 @@ async function openWizard(entity, id) {
 	const values = {};
 	for (const f of def.fields) {
 		if (f.type === 'info' || f.type === 'warn') continue;
-		values[f.key] = data[f.key] ?? null;
+		if (f.type === 'checkbox') {
+			values[f.key] = data[f.key] != null ? !!data[f.key] : false;
+		} else {
+			values[f.key] = data[f.key] ?? null;
+		}
 	}
 	const idx0 = def.fields.findIndex(f => f.type !== 'info' && f.type !== 'warn');
 	wiz = {entity, mode: id ? 'edit' : 'create', id, def, values, idx: idx0 < 0 ? 0 : idx0};
@@ -415,6 +419,7 @@ async function openWizard(entity, id) {
 
 function wizFieldHasValue(f) {
 	const v = wiz.values[f.key];
+	if (f.type === 'checkbox') return v === true || v === false;
 	return !(v === null || v === '' || v === undefined);
 }
 
@@ -500,6 +505,12 @@ function renderWizard() {
 
 function renderInputForField(f) {
 	const v = wiz.values[f.key];
+	if (f.type === 'checkbox') {
+		return `<label style="display:flex;align-items:center;gap:8px;margin-top:8px">
+			<input id="w_input" type="checkbox" ${v ? 'checked' : ''} style="width:auto">
+			<span>${esc(f.label)}</span>
+		</label>`;
+	}
 	if (f.type === 'number') {
 		return `<input id="w_input" type="number" step="${f.step || '1'}" value="${v ?? ''}" autofocus>`;
 	}
@@ -556,9 +567,14 @@ function attachInputEvents() {
 	const f = wiz.def.fields[wiz.idx];
 	const update = () => {
 		const raw = el.value;
-		if (f.type === 'number') wiz.values[f.key] = raw === '' ? null : parseFloat(raw);
-		else if (f.type === 'honeytee_select') wiz.values[f.key] = raw === '' ? null : parseInt(raw);
-		else wiz.values[f.key] = raw;
+		if (f.type === 'checkbox') {
+			wiz.values[f.key] = el.checked;
+		} else {
+			const raw = el.value;
+			if (f.type === 'number') wiz.values[f.key] = raw === '' ? null : parseFloat(raw);
+			else if (f.type === 'honeytee_select') wiz.values[f.key] = raw === '' ? null : parseInt(raw);
+			else wiz.values[f.key] = raw;
+		}
 		const canNext = wizFieldHasValue(f) || !f.required;
 		const isLast = wiz.idx === wiz.def.fields.length - 1;
 		const btnNext = document.getElementById('w_next');
@@ -607,6 +623,10 @@ function syncCurrentInput() {
 	const el = document.getElementById('w_input');
 	if (!el) return;
 	const f = wiz.def.fields[wiz.idx];
+	if (f.type === 'checkbox') {
+		wiz.values[f.key] = el.checked;
+		return;
+	}
 	const raw = el.value;
 	if (f.type === 'number') wiz.values[f.key] = raw === '' ? null : parseFloat(raw);
 	else if (f.type === 'honeytee_select') wiz.values[f.key] = raw === '' ? null : parseInt(raw);
@@ -647,10 +667,6 @@ async function submitWizard() {
 		if (f.type === 'info' || f.type === 'warn') continue;
 		body[f.key] = wiz.values[f.key];
 	}
-	// если создаём базу из «нового цикла», передаём родителя
-	if (wiz.entity === 'jar' && wiz.mode === 'create' && wiz.fromJarId) {
-		body.from_jar_id = wiz.fromJarId;
-	}
 	try {
 		if (wiz.mode === 'create') await api.post(wiz.def.endpoint, body);
 		else await api.patch(`${wiz.def.endpoint}/${wiz.id}`, body);
@@ -685,13 +701,21 @@ async function openBottle(id) {
 		if (e.event_type === 'additive_added') summary = `добавка: ${esc(p.name)} ${p.amount}${UNIT_LABEL[p.unit] || ''}`;
 		else if (e.event_type === 'additive_removed') summary = `удалена добавка: ${esc(p.name || '')}`;
 		else if (e.event_type === 'bottled') summary = 'бутылка создана';
-		else if (e.event_type === 'f2_finished') summary = `F2 завершена (карб. ${p.carbonation || '?'})`;
+		else if (e.event_type === 'f2_finished') summary = `F2 завершена`;
 		else if (e.event_type === 'pet_check') summary = `проверка ПЭТ: ${p.bubbled ? 'надулась' : 'ещё нет'}`;
 		else if (e.event_type === 'chill_out') summary = 'достали из холодильника';
 		else if (e.event_type === 'discarded') summary = `🗑 выброшено: ${esc(p.reason || 'без причины')}`;
 		else if (e.event_type === 'stage_changed') summary = `стадия → ${e.stage}`;
 		else if (e.event_type === 'note') summary = `«${esc(p.text || '')}»`;
-		else if (e.event_type === 'tasting') summary = `🍷 ${p.rating ? '★'.repeat(p.rating) + '☆'.repeat(5 - p.rating) + ' · ' : ''}${esc(p.note || 'без комментария')}`;
+		else if (e.event_type === 'tasting') {
+			const parts = [];
+			if (p.rating) parts.push('★'.repeat(p.rating) + '☆'.repeat(5 - p.rating));
+			if (p.note) parts.push(`«${esc(p.note)}»`);
+			if (p.carbonation) parts.push(`карб. ${p.carbonation}/5`);
+			if (p.sediment === true) parts.push('осадок: да');
+			else if (p.sediment === false) parts.push('осадок: нет');
+			summary = `🍷 ${parts.join(' · ') || 'выпито'}`;
+		}
 		else if (e.event_type === 'edited') summary = `правка: залито → ${p.filled_ml}`;
 
 		const btns = BOTTLE_EDITABLE.has(e.event_type)
@@ -742,9 +766,11 @@ async function openBottle(id) {
     </div>
     <div class="meta">${b.volume_ml} мл (${MATERIAL_LABEL[b.material] || b.material}) • залито ${b.filled_ml} мл</div>
     ${b.abv != null ? `<div class="meta">≈ ${b.abv}% алкоголя</div>` : ''}
+	${b.chill_hours != null ? `<div class="meta">В холодильнике: ${b.chill_hours} ч</div>` : ''}
     ${b.carbonation != null ? `<div class="meta">Карбонизация: ${'★'.repeat(b.carbonation)}${'☆'.repeat(5 - b.carbonation)}</div>` : ''}
     ${b.sediment != null ? `<div class="meta">Осадок: ${b.sediment ? 'да' : 'нет'}${b.sediment_note ? ' (' + esc(b.sediment_note) + ')' : ''}</div>` : ''}
-    ${b.chill_hours != null ? `<div class="meta">В холодильнике: ${b.chill_hours} ч</div>` : ''}
+    ${b.rating != null ? `<div class="meta">Оценка: ${'★'.repeat(b.rating)}${'☆'.repeat(5 - b.rating)}</div>` : ''}
+    ${b.tasting_note != null ? `<div class="meta">Комментарий: ${esc(b.tasting_note)}</div>` : ''}
     ${b.pet_last_check ? `<div class="meta">Последняя проверка ПЭТ: ${fmtDate(b.pet_last_check)} (${humanDays(Math.floor((Date.now() - new Date(b.pet_last_check).getTime())/(1000*60*60*24)))})</div>` : ''}
 
     ${actionsHtml}
@@ -1014,8 +1040,8 @@ async function discardBottle(bottleId) {
 
 function consumeBottleForm(bottleId) {
 	openModal(`
-    <h2>Отзыв о бутылке</h2>
-    <label>Оценка (1–5)</label>
+    <h2>Выпито</h2>
+    <label>Оценка вкуса (1–5)</label>
     <select id="cons_rating">
       <option value="">— без оценки —</option>
       <option value="5">5 — отлично</option>
@@ -1024,8 +1050,25 @@ function consumeBottleForm(bottleId) {
       <option value="2">2 — так себе</option>
       <option value="1">1 — плохо</option>
     </select>
+    <label>Карбонизация (1–5)</label>
+    <select id="cons_carb">
+      <option value="">— без оценки —</option>
+      <option value="5">5 — очень газированная</option>
+      <option value="4">4 — хорошо газированная</option>
+      <option value="3">3 — средне</option>
+      <option value="2">2 — слабо</option>
+      <option value="1">1 — почти без газа</option>
+    </select>
+    <label>Осадок</label>
+    <select id="cons_sed">
+      <option value="">— не указано —</option>
+      <option value="no">Нет</option>
+      <option value="yes">Да</option>
+    </select>
+    <label>Заметка об осадке</label>
+    <input id="cons_sed_note" type="text" placeholder="например, немного на дне">
     <label>Комментарий</label>
-    <textarea id="cons_note" rows="3" placeholder="Вкус, газирование, аромат…"></textarea>
+    <textarea id="cons_note" rows="3" placeholder="Вкус, аромат…"></textarea>
     <div class="actions">
       <button class="ghost" onclick="openBottle(${bottleId})">Назад</button>
       <button class="primary" onclick="consumeBottle(${bottleId})">Выпито</button>
@@ -1035,21 +1078,19 @@ function consumeBottleForm(bottleId) {
 
 async function consumeBottle(bottleId) {
 	const ratingStr = document.getElementById('cons_rating').value;
+	const carbStr = document.getElementById('cons_carb').value;
+	const sedStr = document.getElementById('cons_sed').value;
+	const sedNote = document.getElementById('cons_sed_note').value.trim();
 	const note = document.getElementById('cons_note').value.trim();
+	const body = {
+		rating: ratingStr ? parseInt(ratingStr) : null,
+		note: note || null,
+		carbonation: carbStr ? parseInt(carbStr) : null,
+		sediment: sedStr === '' ? null : (sedStr === 'yes'),
+		sediment_note: sedNote || null,
+	};
 	try {
-		if (ratingStr || note) {
-			await api.post('/api/events', {
-				entity_type: 'bottle',
-				entity_id: bottleId,
-				stage: 'consumed',
-				event_type: 'tasting',
-				payload: {
-					rating: ratingStr ? parseInt(ratingStr) : null,
-					note: note || null,
-				},
-			});
-		}
-		await api.post(`/api/bottles/${bottleId}/stage`, {stage: 'consumed'});
+		await api.post(`/api/bottles/${bottleId}/consume`, body);
 		await refresh();
 		openBottle(bottleId);
 	} catch (e) {
@@ -1180,12 +1221,13 @@ async function openJar(id, fromBottleId) {
       `}
     </div>
     <div class="meta">Создана: ${fmtDate(j.created_at)}</div>
-        ${j.honeytee ? `
+	${j.cleaned ? '<div class="meta">✓ Лимонадница очищена от осадка</div>' : ''}
+	${j.honeytee ? `
         <div class="card" style="padding:8px;margin:8px 0;cursor:pointer" onclick="openHoneytee(${j.honeytee.id}, ${id}, ${fromBottleId || 'null'})">
         <b>Медочай</b>
         <div class="meta">${esc(j.honeytee.tea_type || '?')} ${j.honeytee.tea_g || '?'} г • ${esc(j.honeytee.honey_type || '?')} ${j.honeytee.honey_g || '?'} г</div>
-      </div>
-    ` : '<div class="meta">Медочай: —</div>'}
+      </div>`
+		: '<div class="meta">Медочай: —</div>'}
     <div class="meta">Медочай: ${j.honeytee && j.honeytee.mead_ml ? j.honeytee.mead_ml + ' мл' : '—'} • Стартер: ${j.starter_ml || '?'} мл</div>
     <div class="meta">ρ старт: ${j.rho_start != null ? j.rho_start + ' °Brix' : '—'}${j.state === 'bottled' ? ` • ρ финал: ${j.rho_final != null ? j.rho_final + ' °Brix' : '—'}` : ''}</div>
     <div class="meta">pH старт: ${j.ph ?? '—'}${j.final_ph != null ? ' • pH финал: ' + j.final_ph : ''}</div>
@@ -1210,11 +1252,6 @@ async function openJar(id, fromBottleId) {
     ${j.state === 'bottled' ? `
       <h3 style="margin-top:14px;font-size:14px">История</h3>
       <ul class="events">${history}</ul>
-      ${!j.next_cycle_started ? `
-        <div class="row" style="margin-top:8px">
-          <button class="primary" onclick="newCycle(${id})">Новый цикл</button>
-        </div>
-      ` : ''}
     ` : ''}
 
     ${bottles ? `<h3 style="margin-top:14px;font-size:14px">Бутылки партии</h3>${bottles}` : ''}
@@ -1235,7 +1272,6 @@ function renderJarHistory(events, jarId) {
 	const VISIBLE = new Set([
 		'ph', 'note', 'created',
 		'f1_finished', 'bottled',
-		'new_cycle_started',
 	]);
 
 	const items = [];
@@ -1250,7 +1286,6 @@ function renderJarHistory(events, jarId) {
 		else if (ev.event_type === 'created') summary = 'создание базы';
 		else if (ev.event_type === 'f1_finished') summary = `F1 завершена (pH ${p.final_ph}, ρ финал ${p.rho_final ?? '—'})`;
 		else if (ev.event_type === 'bottled') summary = `розлив: ${p.bottles_count} бутылок, ${p.total_filled_ml} мл`;
-		else if (ev.event_type === 'new_cycle_started') summary = `запущен новый цикл: #${p.new_jar_id ?? '?'}`;
 
 		const btns = EDITABLE.has(ev.event_type)
 			? `<button class="ghost" onclick="editJarEvent(${ev.id}, ${jarId})">✏️</button>
@@ -1893,224 +1928,15 @@ async function finishF1Wizard(jarId) {
 	render();
 }
 
-// ---------- F2 finish wizard ----------
-async function finishF2Wizard(jarId, fromBottleId) {
-	const wizF2 = {
-		jarId,
-		fromBottleId,
-		step: 0,
-		fields: [
-			{key: 'carbonation', label: 'Карбонизация (1–5)', type: 'number', step: '1', required: true},
-			{key: 'sediment', label: 'Осадок', type: 'select', required: true},
-			{key: 'sediment_note', label: 'Заметка об осадке', type: 'text', required: false},
-			{key: '__info', label: 'Что дальше', type: 'info'},
-		],
-		values: {carbonation: null, sediment: null, sediment_note: ''},
-	};
-
-	function hasValue(f) {
-		if (f.type === 'info') return true;
-		const v = wizF2.values[f.key];
-		return !(v === null || v === '' || v === undefined);
+// ---------- F2 ----------
+async function finishF2(jarId) {
+	if (!confirm('Завершить F2 партии? Бутылки перейдут на следующий этап.')) return;
+	try {
+		await api.post(`/api/jars/${jarId}/finish_f2`);
+		await refresh();
+	} catch (e) {
+		alert('Ошибка: ' + e.message);
 	}
-
-	function canSave() {
-		for (const f of wizF2.fields) {
-			if (f.type === 'info') continue;
-			if (!f.required) continue;
-			if (!hasValue(f)) return false;
-		}
-		return true;
-	}
-
-	function render() {
-		const step = wizF2.step;
-		const f = wizF2.fields[step];
-		const isLast = step === wizF2.fields.length - 1;
-
-		const plan = wizF2.fields.map((fld, i) => {
-			let icon;
-			if (fld.type === 'info') icon = 'ℹ️';
-			else if (hasValue(fld)) icon = '✅';
-			else if (fld.required) icon = '⬜';
-			else icon = '❔';
-			const cur = i === step ? ' current' : '';
-			let val = '';
-			if (fld.type === 'info') val = '';
-			else if (fld.key === 'sediment') val = wizF2.values[fld.key] === 'yes' ? 'Да' : (wizF2.values[fld.key] === 'no' ? 'Нет' : '');
-			else val = wizF2.values[fld.key] ?? '';
-			return `<li class="${cur}" onclick="f2Jump(${i})">
-        <span class="st">${icon}</span>
-        <span class="name">${esc(fld.label)}</span>
-        <span class="val">${esc(val)}</span>
-      </li>`;
-		}).join('');
-
-		let body;
-		if (f.type === 'info') {
-			const bottles = state.bottles.filter(b => b.jar_id === jarId);
-			const toFridge = bottles.filter(b => !b.has_additives);
-			const toF3 = bottles.filter(b => b.has_additives);
-
-			const lines = [];
-			if (toFridge.length) {
-				lines.push(`<div style="margin-top:8px"><b>→ В холодильник:</b> ${toFridge.map(b => esc(b.title)).join(', ')}</div>`);
-			}
-			if (toF3.length) {
-				lines.push(`<div style="margin-top:${lines.length ? '4px' : '8px'}"><b>→ На F3:</b> ${toF3.map(b => esc(b.title)).join(', ')}</div>`);
-			}
-			if (!lines.length) {
-				lines.push('<div style="margin-top:8px">В партии нет бутылок.</div>');
-			}
-
-			body = `
-        <div class="info-box">
-          <div>После завершения F2 партия расходится путями:</div>
-          ${lines.join('')}
-        </div>
-      `;
-		} else if (f.key === 'carbonation') {
-			body = `<input id="f2_input" type="number" min="1" max="5" step="1" value="${wizF2.values.carbonation}" autofocus>`;
-		} else if (f.key === 'sediment') {
-			body = `<select id="f2_input">
-        <option value="" ${!wizF2.values.sediment ? 'selected' : ''}>— выберите —</option>
-        <option value="no" ${wizF2.values.sediment === 'no' ? 'selected' : ''}>Нет</option>
-        <option value="yes" ${wizF2.values.sediment === 'yes' ? 'selected' : ''}>Да</option>
-      </select>`;
-		} else {
-			body = `<textarea id="f2_input" rows="2" autofocus>${esc(wizF2.values.sediment_note || '')}</textarea>`;
-		}
-
-		const canNext = (f.type === 'info') ? true : (hasValue(f) || !f.required);
-		const canSv = canSave();
-
-		openModal(`
-      <div class="modal-head">
-        <h2>Завершение F2</h2>
-        <button class="primary" id="f2_save" onclick="f2Finish()" ${canSv ? '' : 'disabled'}>💾 Сохранить</button>
-      </div>
-      <ul class="plan">${plan}</ul>
-      <div class="step-title">Шаг ${step + 1} из ${wizF2.fields.length}: <b>${esc(f.label)}</b></div>
-      ${body}
-      <div class="wiz-actions">
-        <button class="ghost" onclick="f2Prev()" ${step === 0 ? 'disabled' : ''}>← Назад</button>
-        <button class="primary" id="f2_next" onclick="f2Next()" ${(canNext && !isLast) ? '' : 'disabled'}>Далее →</button>
-      </div>
-      <div class="actions">
-        <button class="ghost" onclick="f2Cancel()">Отмена</button>
-      </div>
-    `);
-
-		// навесить input-listener
-		const input = document.getElementById('f2_input');
-		if (input) {
-			const onInput = () => {
-				const raw = input.value;
-				if (f.key === 'carbonation') wizF2.values.carbonation = raw === '' ? null : parseInt(raw);
-				else if (f.key === 'sediment') wizF2.values.sediment = raw;
-				else wizF2.values.sediment_note = raw;
-				const canNext2 = (hasValue(f) || !f.required);
-				const isLast2 = wizF2.step === wizF2.fields.length - 1;
-				const btnNext = document.getElementById('f2_next');
-				if (btnNext) btnNext.disabled = !(canNext2 && !isLast2);
-				const btnSave = document.getElementById('f2_save');
-				if (btnSave) btnSave.disabled = !canSave();
-				updatePlan();
-			};
-			input.addEventListener('input', onInput);
-			input.addEventListener('change', onInput);
-		}
-
-		window.f2Prev = () => {
-			if (wizF2.step > 0) {
-				syncF2Input();
-				wizF2.step--;
-				render();
-			}
-		};
-		window.f2Next = () => {
-			if (wizF2.step < wizF2.fields.length - 1) {
-				syncF2Input();
-				wizF2.step++;
-				render();
-			}
-		};
-		window.f2Jump = (i) => {
-			syncF2Input();
-			wizF2.step = i;
-			render();
-		};
-	}
-
-	function syncF2Input() {
-		const input = document.getElementById('f2_input');
-		if (!input) return;
-		const f = wizF2.fields[wizF2.step];
-		const raw = input.value;
-		if (f.key === 'carbonation') wizF2.values.carbonation = raw === '' ? null : parseInt(raw);
-		else if (f.key === 'sediment') wizF2.values.sediment = raw;
-		else if (f.key === 'sediment_note') wizF2.values.sediment_note = raw;
-	}
-
-	function updatePlan() {
-		const planEl = document.querySelector('.plan');
-		if (!planEl) return;
-		planEl.innerHTML = wizF2.fields.map((fld, i) => {
-			let icon;
-			if (fld.type === 'info') icon = 'ℹ️';
-			else if (hasValue(fld)) icon = '✅';
-			else if (fld.required) icon = '⬜';
-			else icon = '❔';
-			const cur = i === wizF2.step ? ' current' : '';
-			let val = '';
-			if (fld.type === 'info') val = '';
-			else if (fld.key === 'sediment') val = wizF2.values[fld.key] === 'yes' ? 'Да' : (wizF2.values[fld.key] === 'no' ? 'Нет' : '');
-			else val = wizF2.values[fld.key] ?? '';
-			return `<li class="${cur}" onclick="f2Jump(${i})">
-        <span class="st">${icon}</span>
-        <span class="name">${esc(fld.label)}</span>
-        <span class="val">${esc(val)}</span>
-      </li>`;
-		}).join('');
-	}
-
-	window.f2Cancel = () => {
-		if (fromBottleId) openBottle(fromBottleId);
-		else closeModal();
-	};
-
-	window.f2Finish = async () => {
-		syncF2Input();
-		// проверка обязательных
-		for (const f of wizF2.fields) {
-			if (f.type === 'info') continue;
-			if (!f.required) continue;
-			if (!hasValue(f)) {
-				alert('Заполните обязательное поле: ' + f.label);
-				return;
-			}
-		}
-		const c = wizF2.values.carbonation;
-		if (isNaN(c) || c < 1 || c > 5) {
-			alert('Карбонизация: введите число от 1 до 5');
-			return;
-		}
-		const data = {
-			carbonation: c,
-			sediment: wizF2.values.sediment === 'yes',
-			sediment_note: wizF2.values.sediment_note || null,
-		};
-		try {
-			await api.post(`/api/jars/${jarId}/finish_f2`, data);
-			await refresh();
-			if (fromBottleId) openBottle(fromBottleId);
-			else closeModal();
-		} catch (e) {
-			alert('Ошибка: ' + e.message);
-		}
-	};
-
-	render();
 }
 
 function f2Status(g, jars) {
@@ -2196,32 +2022,6 @@ async function f2ForceReady(jarId) {
 		await refresh();
 	} catch (e) {
 		alert(e.message);
-	}
-}
-
-// ---------- New cycle ----------
-async function newCycle(jarId) {
-	const jar = await api.get('/api/jars/' + jarId);
-	const leftover = jar.leftover_ml;
-	const r = await api.post(`/api/jars/${jarId}/new_cycle`);
-	if (!r.available_honeytee.length) {
-		openModal(`
-      <h2>Нет доступных медочаев</h2>
-      <p>Чтобы начать новый цикл, сначала создайте медочай.</p>
-      <div class="actions">
-        <button class="ghost" onclick="closeModal()">Отмена</button>
-        <button class="primary" onclick="closeModal(); switchTab('honeytee'); openWizard('honeytee')">Создать медочай</button>
-      </div>
-    `);
-		return;
-	}
-	closeModal();
-	await openWizard('jar');
-	// запомним, что новая база создаётся из этой
-	wiz.fromJarId = jarId;
-	if (leftover && leftover > 0 && wiz && wiz.entity === 'jar') {
-		wiz.values.starter_ml = leftover;
-		renderWizard();
 	}
 }
 

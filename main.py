@@ -27,7 +27,7 @@ VALID_EVENT_TYPES = {
     "created", "edited", "note", "ph", "tasting", "discarded",
     "additive_added", "additive_edited", "additive_removed",
     "bottled", "f1_finished", "f2_finished", "f2_force_ready",
-    "pet_check", "chill_out", "stage_changed", "new_cycle_started",
+    "pet_check", "chill_out", "stage_changed",
 }
 JAR_CAPACITY_ML = 2300
 
@@ -62,6 +62,7 @@ def init_db():
             title TEXT,
             starter_ml REAL,
             ph REAL,
+            cleaned INTEGER DEFAULT 0,
             final_ph REAL,
             rho_final REAL,
             abv REAL,
@@ -89,6 +90,8 @@ def init_db():
             pet_last_check TEXT,
             pet_bottle_id INTEGER,
             carbonation INTEGER,
+            rating INTEGER,
+            tasting_note TEXT,
             sediment INTEGER,
             sediment_note TEXT,
             chill_start TEXT,
@@ -231,7 +234,7 @@ class JarIn(BaseModel):
     honeytee_id: int
     starter_ml: Optional[float] = None
     ph: Optional[float] = None
-    from_jar_id: Optional[int] = None
+    cleaned: Optional[bool] = None
 
 
 class JarFinishF1In(BaseModel):
@@ -250,6 +253,13 @@ class AdditiveIn(BaseModel):
 class BottleIn(BaseModel):
     filled_ml: Optional[float] = None
 
+class ConsumeIn(BaseModel):
+    rating: Optional[int] = None
+    note: Optional[str] = None
+    carbonation: Optional[int] = None
+    sediment: Optional[bool] = None
+    sediment_note: Optional[str] = None
+
 
 class EventIn(BaseModel):
     entity_type: str
@@ -266,12 +276,6 @@ class EventPatch(BaseModel):
 
 class PetCheckIn(BaseModel):
     bubbled: bool
-
-
-class JarFinishF2In(BaseModel):
-    carbonation: int
-    sediment: bool
-    sediment_note: Optional[str] = None
 
 
 class NoteIn(BaseModel):
@@ -473,34 +477,18 @@ def create_jar(payload: JarIn):
         if used:
             raise HTTPException(409, "Этот медочай уже использован для другой базы")
 
-        # валидация родителя для нового цикла
-        parent = None
-        if payload.from_jar_id:
-            parent = conn.execute("SELECT * FROM jar WHERE id=?", (payload.from_jar_id,)).fetchone()
-            if not parent:
-                raise HTTPException(404, f"Родительская база #{payload.from_jar_id} не найдена")
-            if parent["state"] != "bottled":
-                raise HTTPException(409, "Родительская база должна быть в состоянии «разлито»")
-            if parent["next_cycle_started"]:
-                raise HTTPException(409, "Из этой базы уже запущен новый цикл")
-
         created = now_iso()
         cur = conn.execute(
             """INSERT INTO jar
-               (honeytee_id, created_at, title, starter_ml, ph, f1_start, state)
-               VALUES (?,?,?,?,?,?,?)""",
-            (payload.honeytee_id, created, "", payload.starter_ml, payload.ph, created, "f1"),
+               (honeytee_id, created_at, title, starter_ml, ph, f1_start, state, cleaned)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (payload.honeytee_id, created, "", payload.starter_ml, payload.ph,
+             created, "f1", 1 if payload.cleaned else 0),
         )
         jid = cur.lastrowid
         title = make_jar_title(conn, jid, payload.honeytee_id)
         conn.execute("UPDATE jar SET title=? WHERE id=?", (title, jid))
         log_event(conn, "jar", jid, "f1", "created", payload.model_dump())
-
-        if parent:
-            conn.execute("UPDATE jar SET next_cycle_started=1 WHERE id=?", (payload.from_jar_id,))
-            log_event(conn, "jar", payload.from_jar_id, parent["state"], "new_cycle_started", {
-                "new_jar_id": jid,
-            })
 
         return enrich_jar(row_to_dict(conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()), conn)
 
@@ -559,7 +547,7 @@ def finish_f1(jid: int, payload: JarFinishF1In):
                     stage, has_additives, additives, f2_start, abv)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (jid, now, title, b.get("volume_ml"), b.get("material"),
-                 b.get("filled_ml"), "f2", None,
+                 b.get("filled_ml"), "f2",
                  0, "[]", now, abv),
             )
             bid = cur.lastrowid
@@ -596,20 +584,6 @@ def finish_f1(jid: int, payload: JarFinishF1In):
             "rho_final": payload.rho_final,
         })
         return enrich_jar(row_to_dict(conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()), conn)
-
-
-@app.post("/api/jars/{jid}/new_cycle")
-def new_cycle_hint(jid: int):
-    with db() as conn:
-        j = conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()
-        if not j:
-            raise HTTPException(404, "jar not found")
-        available = conn.execute("""
-            SELECT h.* FROM honeytee h
-            WHERE NOT EXISTS (SELECT 1 FROM jar j WHERE j.honeytee_id = h.id)
-            ORDER BY h.id DESC
-        """).fetchall()
-        return {"available_honeytee": [row_to_dict(r) for r in available]}
 
 
 @app.post("/api/jars/{jid}/force_f2_ready")
@@ -716,10 +690,10 @@ def patch_bottle(bid: int, payload: BottleIn):
         if row["stage"] != "f2" and not row["has_additives"]:
             raise HTTPException(409, "Нельзя редактировать бутылку без добавок после F2")
         upd = {}
-        if payload.filled_ml is not None:
+        if payload.filled_ml is not None and payload.filled_ml != row["filled_ml"]:
             upd["filled_ml"] = payload.filled_ml
         if not upd:
-            raise HTTPException(400, "no fields to update")
+            return bottle_to_dict(row)
         sets = ", ".join(f"{k}=?" for k in upd)
         conn.execute(f"UPDATE bottles SET {sets} WHERE id=?", (*upd.values(), bid))
         log_event(conn, "bottle", bid, row["stage"], "edited", upd)
@@ -811,6 +785,43 @@ def remove_additive(bid: int, idx: int):
         log_event(conn, "bottle", bid, row["stage"], "additive_removed", removed)
         return bottle_to_dict(conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone())
 
+@app.post("/api/bottles/{bid}/consume")
+def consume_bottle(bid: int, payload: ConsumeIn):
+    with db() as conn:
+        b = conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone()
+        if not b:
+            raise HTTPException(404, "bottle not found")
+        if b["stage"] in ("consumed", "discarded"):
+            raise HTTPException(409, "бутылка уже в конечной стадии")
+        # обновляем поля бутылки
+        upd = {"stage": "consumed"}
+        if payload.rating is not None:
+            if payload.rating < 1 or payload.rating > 5:
+                raise HTTPException(400, "rating must be 1..5")
+            upd["rating"] = payload.rating
+        if payload.note is not None:
+            upd["tasting_note"] = payload.note
+        if payload.carbonation is not None:
+            if payload.carbonation < 1 or payload.carbonation > 5:
+                raise HTTPException(400, "carbonation must be 1..5")
+            upd["carbonation"] = payload.carbonation
+        if payload.sediment is not None:
+            upd["sediment"] = 1 if payload.sediment else 0
+        if payload.sediment_note is not None:
+            upd["sediment_note"] = payload.sediment_note
+        sets = ", ".join(f"{k}=?" for k in upd)
+        conn.execute(f"UPDATE bottles SET {sets} WHERE id=?", (*upd.values(), bid))
+        # событие tasting (для истории) — пишем всегда, если есть что
+        if payload.rating is not None or payload.note:
+            log_event(conn, "bottle", bid, "consumed", "tasting", {
+                "rating": payload.rating,
+                "note": payload.note,
+                "carbonation": payload.carbonation,
+                "sediment": payload.sediment,
+                "sediment_note": payload.sediment_note,
+            })
+        log_event(conn, "bottle", bid, "consumed", "stage_changed")
+        return bottle_to_dict(conn.execute("SELECT * FROM bottles WHERE id=?", (bid,)).fetchone())
 
 @app.post("/api/bottles/{bid}/pet_check")
 def bottle_pet_check(bid: int, payload: PetCheckIn):
@@ -846,9 +857,7 @@ def jar_pet_status(jid: int):
 
 
 @app.post("/api/jars/{jid}/finish_f2")
-def finish_f2(jid: int, payload: JarFinishF2In):
-    if payload.carbonation < 1 or payload.carbonation > 5:
-        raise HTTPException(400, "carbonation must be 1..5")
+def finish_f2(jid: int):
     with db() as conn:
         j = conn.execute("SELECT * FROM jar WHERE id=?", (jid,)).fetchone()
         if not j:
@@ -867,19 +876,16 @@ def finish_f2(jid: int, payload: JarFinishF2In):
             updates = {
                 "stage": new_stage,
                 "f2_end": now,
-                "carbonation": payload.carbonation,
-                "sediment": 1 if payload.sediment else 0,
-                "sediment_note": payload.sediment_note,
             }
-            if new_stage == "chilling":
+            if new_stage == "f3":
+                updates["f3_chill_start"] = now
+            elif new_stage == "chilling":
                 updates["chill_start"] = now
             sets = ", ".join(f"{k}=?" for k in updates)
             conn.execute(f"UPDATE bottles SET {sets} WHERE id=?", (*updates.values(), b["id"]))
-            log_event(conn, "bottle", b["id"], new_stage, "f2_finished",
-                      {"carbonation": payload.carbonation, "sediment": payload.sediment})
-        # сбрасываем форс-флаг — F2 завершён
+            log_event(conn, "bottle", b["id"], new_stage, "f2_finished")
         conn.execute("UPDATE jar SET f2_force_ready=0 WHERE id=?", (jid,))
-        log_event(conn, "jar", jid, "f2", "f2_finished", payload.model_dump())
+        log_event(conn, "jar", jid, "f2", "f2_finished")
         return {"ok": True}
 
 
